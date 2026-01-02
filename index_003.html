@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Rapier2D Thruster - Smooth Wrap</title>
+<style>
+  body { margin: 0; overflow: hidden; background: #111; font-family: sans-serif; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+
+<script type="module">
+import RAPIER from "https://cdn.skypack.dev/@dimforge/rapier2d-compat";
+import { Pane } from "https://cdn.jsdelivr.net/npm/tweakpane@4.0.5/dist/tweakpane.min.js";
+
+/* ---------------- INIT ---------------- */
+
+await RAPIER.init();
+
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+
+function resize() {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+}
+window.addEventListener("resize", resize);
+resize();
+
+const SCALE = 60; // Pixels per meter
+const SIZE = 1;   // Vehicle size in meters
+
+/* ---------------- PARAMETERS ---------------- */
+
+const params = {
+  thrustPower: 0.15,
+  thrusterOffsetX: 0.4,
+  thrusterOffsetY: 0.5,
+  linearDamping: 1.5,
+  angularDamping: 2.5,
+  gravityY: 0,
+  timeScale: 1,
+  worldSizeScale: 0.8,
+};
+
+/* ---------------- TWEAKPANE ---------------- */
+
+const pane = new Pane();
+const thrustersPane = pane.addFolder({ title: "Thrusters" });
+thrustersPane.addBinding(params, "thrustPower", { min: 0, max: 1 });
+thrustersPane.addBinding(params, "thrusterOffsetX", { min: 0, max: 1 });
+thrustersPane.addBinding(params, "thrusterOffsetY", { min: 0, max: 1 });
+
+const physicsPane = pane.addFolder({ title: "Physics" });
+physicsPane.addBinding(params, "linearDamping", { min: 0, max: 10 });
+physicsPane.addBinding(params, "angularDamping", { min: 0, max: 10 });
+
+const worldPane = pane.addFolder({ title: "World" });
+worldPane.addBinding(params, "gravityY", { min: -20, max: 20 });
+worldPane.addBinding(params, "timeScale", { min: 0.1, max: 2 });
+worldPane.addBinding(params, "worldSizeScale", { min: 0.2, max: 1, label: "Area Size" });
+
+/* ---------------- PHYSICS WORLD ---------------- */
+
+const world = new RAPIER.World({ x: 0, y: params.gravityY });
+
+const vehicle = world.createRigidBody(
+  RAPIER.RigidBodyDesc.dynamic()
+    .setTranslation(0, 0)
+    .setLinearDamping(params.linearDamping)
+    .setAngularDamping(params.angularDamping)
+);
+
+world.createCollider(
+  RAPIER.ColliderDesc.cuboid(SIZE / 2, SIZE / 2),
+  vehicle
+);
+
+/* ---------------- INPUT ---------------- */
+
+const keys = {};
+window.addEventListener("keydown", e => keys[e.key.toLowerCase()] = true);
+window.addEventListener("keyup",   e => keys[e.key.toLowerCase()] = false);
+
+/* ---------------- UTILS & WRAPPING ---------------- */
+
+function getWorldBounds() {
+  const sideLength = Math.min(canvas.width, canvas.height) * params.worldSizeScale;
+  const halfSize = (sideLength / 2) / SCALE;
+  return { halfSize, pixelSize: sideLength };
+}
+
+function handleWrapping(body) {
+  const { halfSize } = getWorldBounds();
+  let { x, y } = body.translation();
+  let moved = false;
+
+  const buffer = 0.1; // Small buffer to prevent flickering
+  if (x > halfSize + buffer) { x = -halfSize; moved = true; }
+  else if (x < -halfSize - buffer) { x = halfSize; moved = true; }
+  
+  if (y > halfSize + buffer) { y = -halfSize; moved = true; }
+  else if (y < -halfSize - buffer) { y = halfSize; moved = true; }
+
+  if (moved) body.setTranslation({ x, y }, true);
+}
+
+function localToWorld(body, local) {
+  const a = body.rotation();
+  const c = Math.cos(a);
+  const s = Math.sin(a);
+  const p = body.translation();
+  return {
+    x: p.x + local.x * c - local.y * s,
+    y: p.y + local.x * s + local.y * c
+  };
+}
+
+/* ---------------- LOGIC ---------------- */
+
+function fireThruster(offset) {
+  const a = vehicle.rotation();
+  const impulse = {
+    x: Math.sin(a) * params.thrustPower,
+    y: -Math.cos(a) * params.thrustPower
+  };
+  const point = localToWorld(vehicle, offset);
+  vehicle.applyImpulseAtPoint(impulse, point, true);
+}
+
+function update() {
+  world.gravity.y = params.gravityY;
+  world.timestep = (1 / 60) * params.timeScale;
+
+  vehicle.setLinearDamping(params.linearDamping);
+  vehicle.setAngularDamping(params.angularDamping);
+
+  const leftT = { x: -params.thrusterOffsetX, y: params.thrusterOffsetY };
+  const rightT = { x:  params.thrusterOffsetX, y: params.thrusterOffsetY };
+
+  if (keys["w"]) { fireThruster(leftT); fireThruster(rightT); }
+  if (keys["a"]) { fireThruster(leftT); }
+  if (keys["d"]) { fireThruster(rightT); }
+
+  world.step();
+  handleWrapping(vehicle);
+}
+
+/* ---------------- DRAWING ---------------- */
+
+function drawVehicleAt(x, y, angle, opacity = 1) {
+  ctx.save();
+  ctx.translate(canvas.width / 2 + x * SCALE, canvas.height / 2 + y * SCALE);
+  ctx.rotate(angle);
+  ctx.globalAlpha = opacity;
+
+  // Draw Body
+  ctx.fillStyle = "#4CAF50";
+  ctx.fillRect(-SIZE * SCALE / 2, -SIZE * SCALE / 2, SIZE * SCALE, SIZE * SCALE);
+
+  // Draw Thrusters
+  ctx.fillStyle = "#FF5722";
+  const tX = params.thrusterOffsetX * SCALE;
+  const tY = params.thrusterOffsetY * SCALE;
+  ctx.fillRect(-tX - 5, tY - 5, 10, 10);
+  ctx.fillRect( tX - 5, tY - 5, 10, 10);
+
+  ctx.restore();
+}
+
+function drawScene() {
+  const p = vehicle.translation();
+  const a = vehicle.rotation();
+  const { halfSize, pixelSize } = getWorldBounds();
+  const fullSize = halfSize * 2;
+
+  // 1. Draw Background Bounds
+  ctx.strokeStyle = "#333";
+  ctx.lineWidth = 2;
+  ctx.strokeRect(canvas.width/2 - pixelSize/2, canvas.height/2 - pixelSize/2, pixelSize, pixelSize);
+
+  // Clipping: Ensure nothing is drawn outside the square
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(canvas.width/2 - pixelSize/2, canvas.height/2 - pixelSize/2, pixelSize, pixelSize);
+  ctx.clip();
+
+  // 2. Draw Main Vehicle
+  drawVehicleAt(p.x, p.y, a);
+
+  // 3. Draw Ghosts for smooth wrapping
+  const offsets = [
+    {x: fullSize, y: 0}, {x: -fullSize, y: 0}, // Sides
+    {x: 0, y: fullSize}, {x: 0, y: -fullSize}, // Top/Bottom
+    {x: fullSize, y: fullSize}, {x: -fullSize, y: -fullSize}, // Corners
+    {x: fullSize, y: -fullSize}, {x: -fullSize, y: fullSize}
+  ];
+
+  offsets.forEach(off => {
+    drawVehicleAt(p.x + off.x, p.y + off.y, a, 1.0);
+  });
+
+  ctx.restore();
+}
+
+/* ---------------- MAIN LOOP ---------------- */
+
+function loop() {
+  update();
+  ctx.fillStyle = "#1e1e1e";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  
+  drawScene();
+  
+  requestAnimationFrame(loop);
+}
+
+loop();
+</script>
+</body>
+</html>

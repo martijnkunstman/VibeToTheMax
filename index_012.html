@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <title>Rapier2D - Adjustable AI Explorer</title>
+  <style>
+    body {
+      margin: 0;
+      overflow: hidden;
+      background: #111;
+      font-family: 'Courier New', Courier, monospace;
+    }
+
+    canvas {
+      display: block;
+    }
+
+    #hud {
+      position: absolute;
+      top: 20px;
+      left: 20px;
+      color: #00FF00;
+      font-size: 24px;
+      pointer-events: none;
+      text-shadow: 2px 2px 4px #000;
+    }
+
+    .tp-dfwv {
+      bottom: 20px !important;
+      top: auto !important;
+    }
+  </style>
+</head>
+
+<body>
+  <div id="hud">SCORE: 0</div>
+  <canvas id="game"></canvas>
+
+  <script type="module">
+    import RAPIER from "https://cdn.skypack.dev/@dimforge/rapier2d-compat";
+    import { Pane } from "https://cdn.jsdelivr.net/npm/tweakpane@4.0.5/dist/tweakpane.min.js";
+
+    await RAPIER.init();
+
+    const canvas = document.getElementById("game");
+    const ctx = canvas.getContext("2d");
+    const hud = document.getElementById("hud");
+
+    let score = 0;
+    let targetFood = null;
+    let leftThrusterActive = false;
+    let rightThrusterActive = false;
+    let currentCollider = null;
+
+    function resize() {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+    }
+    window.addEventListener("resize", resize);
+    resize();
+
+    const SCALE = 60;
+
+    /* ---------------- PARAMETERS ---------------- */
+
+    const params = {
+      thrustPower: 0.25,
+      turnThrustMult: 0.4,
+      worldWidth: 80,
+      worldHeight: 80,
+      foodCount: 50,
+      zoom: 0.8,
+      showMiniMap: true,
+      autoSteer: false,
+      autoThrust: false,
+      sensorRange: 30,
+      steeringStrength: 0.15,
+      showSensors: true,
+      thrusterSize: 1.2,
+      // Vehicle Dimensions
+      vWidth: 1.0,
+      vHeight: 1.0
+    };
+
+    const pane = new Pane();
+    const worldPane = pane.addFolder({ title: "World" });
+    worldPane.addBinding(params, "worldWidth", { min: 20, max: 200 });
+    worldPane.addBinding(params, "worldHeight", { min: 20, max: 200 });
+    worldPane.addBinding(params, "zoom", { min: 0.1, max: 2.0 });
+
+    const shipSizePane = pane.addFolder({ title: "Vehicle Size" });
+    shipSizePane.addBinding(params, "vWidth", { min: 0.2, max: 4.0, label: "Width" }).on('change', updateCollider);
+    shipSizePane.addBinding(params, "vHeight", { min: 0.2, max: 4.0, label: "Height" }).on('change', updateCollider);
+
+    const aiPane = pane.addFolder({ title: "AI Pilot" });
+    aiPane.addBinding(params, "autoSteer");
+    aiPane.addBinding(params, "autoThrust");
+    aiPane.addBinding(params, "sensorRange", { min: 5, max: 100 });
+    aiPane.addBinding(params, "steeringStrength", { min: 0.01, max: 0.5 });
+
+    const visualPane = pane.addFolder({ title: "Visuals" });
+    visualPane.addBinding(params, "showSensors");
+    visualPane.addBinding(params, "thrusterSize", { min: 0.5, max: 4.0 });
+
+    /* ---------------- PHYSICS ---------------- */
+
+    const world = new RAPIER.World({ x: 0, y: 0 });
+    const vehicle = world.createRigidBody(
+      RAPIER.RigidBodyDesc.dynamic()
+        .setTranslation(0, 0)
+        .setLinearDamping(1.2)
+        .setAngularDamping(2.5)
+    );
+
+    function updateCollider() {
+      if (currentCollider) {
+        world.removeCollider(currentCollider, true);
+      }
+      const colliderDesc = RAPIER.ColliderDesc.cuboid(params.vWidth / 2, params.vHeight / 2);
+      currentCollider = world.createCollider(colliderDesc, vehicle);
+    }
+    updateCollider();
+
+    let foodParticles = [];
+    function spawnFood() {
+      while (foodParticles.length < params.foodCount) {
+        foodParticles.push({
+          x: (Math.random() - 0.5) * params.worldWidth,
+          y: (Math.random() - 0.5) * params.worldHeight
+        });
+      }
+    }
+
+    /* ---------------- INPUT ---------------- */
+
+    const keys = {};
+    window.addEventListener("keydown", e => keys[e.key.toLowerCase()] = true);
+    window.addEventListener("keyup", e => keys[e.key.toLowerCase()] = false);
+
+    /* ---------------- LOGIC ---------------- */
+
+    function update() {
+      const p = vehicle.translation();
+      const a = vehicle.rotation();
+      const power = params.thrustPower;
+
+      leftThrusterActive = false;
+      rightThrusterActive = false;
+
+      // 1. AI SENSORS
+      targetFood = null;
+      let minDist = params.sensorRange;
+      foodParticles.forEach(f => {
+        const d = Math.hypot(f.x - p.x, f.y - p.y);
+        if (d < minDist) { minDist = d; targetFood = f; }
+      });
+
+      // 2. AI STEERING
+      if (params.autoSteer && targetFood) {
+        const angleToFood = Math.atan2(targetFood.y - p.y, targetFood.x - p.x);
+        let diff = (angleToFood + Math.PI / 2) - a;
+        while (diff < -Math.PI) diff += Math.PI * 2;
+        while (diff > Math.PI) diff -= Math.PI * 2;
+
+        vehicle.applyTorqueImpulse(diff * params.steeringStrength, true);
+
+        if (diff > 0.1) leftThrusterActive = true;
+        if (diff < -0.1) rightThrusterActive = true;
+
+        if (params.autoThrust && Math.abs(diff) < 0.4) {
+          const fwd = { x: Math.sin(a) * power, y: -Math.cos(a) * power };
+          vehicle.applyImpulse(fwd, true);
+          leftThrusterActive = true;
+          rightThrusterActive = true;
+        }
+      }
+
+      // 3. MANUAL OVERRIDE
+      const forwardImpulse = { x: Math.sin(a) * power, y: -Math.cos(a) * power };
+      if (keys["w"]) {
+        vehicle.applyImpulse(forwardImpulse, true);
+        leftThrusterActive = true;
+        rightThrusterActive = true;
+      }
+      if (keys["a"]) {
+        vehicle.applyTorqueImpulse(-0.1, true);
+        vehicle.applyImpulse({ x: forwardImpulse.x * params.turnThrustMult, y: forwardImpulse.y * params.turnThrustMult }, true);
+        rightThrusterActive = true;
+      }
+      if (keys["d"]) {
+        vehicle.applyTorqueImpulse(0.1, true);
+        vehicle.applyImpulse({ x: forwardImpulse.x * params.turnThrustMult, y: forwardImpulse.y * params.turnThrustMult }, true);
+        leftThrusterActive = true;
+      }
+
+      world.step();
+
+      // 4. WRAPPING & COLLECTION
+      let { x, y } = vehicle.translation();
+      const hw = params.worldWidth / 2;
+      const hh = params.worldHeight / 2;
+      if (x > hw) x = -hw; else if (x < -hw) x = hw;
+      if (y > hh) y = -hh; else if (y < -hh) y = hh;
+      vehicle.setTranslation({ x, y }, true);
+
+      foodParticles = foodParticles.filter(f => {
+        // Dynamic collection radius based on vehicle size
+        const collectRadius = Math.max(params.vWidth, params.vHeight) / 2 + 0.3;
+        if (Math.hypot(f.x - x, f.y - y) < collectRadius) {
+          score += 10;
+          hud.innerText = `SCORE: ${score}`;
+          return false;
+        }
+        return true;
+      });
+      spawnFood();
+    }
+
+    /* ---------------- RENDERING ---------------- */
+
+    function drawFlame(x, y) {
+      ctx.save();
+      ctx.translate(x * SCALE, y * SCALE);
+      const flicker = 0.8 + Math.random() * 0.4;
+
+      const grad = ctx.createLinearGradient(0, 0, 0, params.thrusterSize * SCALE * flicker);
+      grad.addColorStop(0, "rgba(255, 255, 255, 1)");
+      grad.addColorStop(0.2, "rgba(255, 200, 0, 1)");
+      grad.addColorStop(0.5, "rgba(255, 80, 0, 0.7)");
+      grad.addColorStop(1, "rgba(255, 0, 0, 0)");
+
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.moveTo(-0.1 * SCALE, 0);
+      ctx.quadraticCurveTo(0, params.thrusterSize * SCALE * flicker, 0.1 * SCALE, 0);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    function drawScene() {
+      const p = vehicle.translation();
+      const a = vehicle.rotation();
+
+      ctx.fillStyle = "#0a0a0a";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      ctx.save();
+      ctx.translate(canvas.width / 2, canvas.height / 2);
+      ctx.scale(params.zoom, params.zoom);
+      ctx.translate(-p.x * SCALE, -p.y * SCALE);
+
+      // Bounds
+      ctx.strokeStyle = "#1a3a1a";
+      ctx.strokeRect(-params.worldWidth / 2 * SCALE, -params.worldHeight / 2 * SCALE, params.worldWidth * SCALE, params.worldHeight * SCALE);
+
+      // AI Target Line
+      if (params.showSensors && targetFood) {
+        ctx.beginPath();
+        ctx.setLineDash([10, 10]);
+        ctx.strokeStyle = "rgba(0, 255, 255, 0.3)";
+        ctx.moveTo(p.x * SCALE, p.y * SCALE);
+        ctx.lineTo(targetFood.x * SCALE, targetFood.y * SCALE);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+
+      // Food
+      ctx.fillStyle = "#FFD700";
+      foodParticles.forEach(f => {
+        ctx.beginPath(); ctx.arc(f.x * SCALE, f.y * SCALE, 0.15 * SCALE, 0, Math.PI * 2); ctx.fill();
+      });
+
+      // Vehicle Rendering
+      ctx.save();
+      ctx.translate(p.x * SCALE, p.y * SCALE);
+      ctx.rotate(a);
+
+      // Dynamic Flame positioning
+      const thrusterY = params.vHeight / 2;
+      const thrusterX = params.vWidth * 0.35;
+      if (leftThrusterActive) drawFlame(-thrusterX, thrusterY);
+      if (rightThrusterActive) drawFlame(thrusterX, thrusterY);
+
+      // Ship Hull
+      ctx.fillStyle = "#4CAF50";
+      ctx.fillRect(-params.vWidth * SCALE / 2, -params.vHeight * SCALE / 2, params.vWidth * SCALE, params.vHeight * SCALE);
+
+      // Cockpit
+      ctx.fillStyle = "#222";
+      ctx.fillRect(-params.vWidth * 0.3 * SCALE, -params.vHeight * 0.4 * SCALE, params.vWidth * 0.6 * SCALE, params.vHeight * 0.3 * SCALE);
+      
+      ctx.restore();
+      ctx.restore();
+
+      drawMiniMap(p);
+    }
+
+    function drawMiniMap(vPos) {
+      const mapSize = 180;
+      const padding = 20;
+      ctx.save();
+      ctx.translate(canvas.width - mapSize - padding, padding);
+
+      ctx.fillStyle = "rgba(0, 40, 0, 0.8)";
+      ctx.strokeStyle = "#00ffcc";
+      ctx.lineWidth = 2;
+      ctx.fillRect(0, 0, mapSize, mapSize);
+      ctx.strokeRect(0, 0, mapSize, mapSize);
+
+      const sx = mapSize / params.worldWidth;
+      const sy = mapSize / params.worldHeight;
+      const ox = params.worldWidth / 2;
+      const oy = params.worldHeight / 2;
+
+      // Food on Mini-map
+      ctx.fillStyle = "#FFD700";
+      foodParticles.forEach(f => {
+        ctx.fillRect((f.x + ox) * sx - 1, (f.y + oy) * sy - 1, 2, 2);
+      });
+
+      // Target on Mini-map
+      if (targetFood) {
+        const tx = (targetFood.x + ox) * sx;
+        const ty = (targetFood.y + oy) * sy;
+        ctx.strokeStyle = "#00ffff";
+        ctx.beginPath();
+        ctx.arc(tx, ty, 4 + Math.sin(Date.now()*0.01)*2, 0, Math.PI*2);
+        ctx.stroke();
+      }
+
+      // Vehicle on Mini-map
+      ctx.fillStyle = "#ffffff";
+      ctx.beginPath();
+      ctx.arc((vPos.x + ox) * sx, (vPos.y + oy) * sy, 4, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.restore();
+    }
+
+    function loop() {
+      update();
+      drawScene();
+      requestAnimationFrame(loop);
+    }
+
+    spawnFood();
+    loop();
+  </script>
+</body>
+
+</html>

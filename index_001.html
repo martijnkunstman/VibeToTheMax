@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Rapier2D Thruster Vehicle</title>
+<style>
+  body {
+    margin: 0;
+    overflow: hidden;
+    background: #111;
+  }
+  canvas {
+    display: block;
+    background: #1e1e1e;
+  }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+
+<script type="module">
+import RAPIER from "https://cdn.skypack.dev/@dimforge/rapier2d-compat";
+
+/* ---------------- INIT ---------------- */
+
+await RAPIER.init();
+
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+
+canvas.width = window.innerWidth;
+canvas.height = window.innerHeight;
+
+const SCALE = 60;
+
+/* ---------------- WORLD ---------------- */
+
+const world = new RAPIER.World({ x: 0, y: 0 });
+
+/* ---------------- VEHICLE ---------------- */
+
+const SIZE = 1;
+
+const vehicle = world.createRigidBody(
+  RAPIER.RigidBodyDesc.dynamic()
+    .setTranslation(0, 0)
+    .setLinearDamping(1.5)
+    .setAngularDamping(2.5)
+);
+
+world.createCollider(
+  RAPIER.ColliderDesc.cuboid(SIZE / 2, SIZE / 2),
+  vehicle
+);
+
+/* ---------------- INPUT ---------------- */
+
+const keys = {};
+window.addEventListener("keydown", e => keys[e.key.toLowerCase()] = true);
+window.addEventListener("keyup",   e => keys[e.key.toLowerCase()] = false);
+
+/* ---------------- MATH ---------------- */
+
+function localToWorld(body, local) {
+  const a = body.rotation();
+  const c = Math.cos(a);
+  const s = Math.sin(a);
+  const p = body.translation();
+
+  return {
+    x: p.x + local.x * c - local.y * s,
+    y: p.y + local.x * s + local.y * c
+  };
+}
+
+/* ---------------- THRUSTERS ---------------- */
+
+const IMPULSE = 0.15;
+
+const LEFT  = { x: -0.4, y:  0.5 };
+const RIGHT = { x:  0.4, y:  0.5 };
+
+function fireThruster(offset) {
+  const a = vehicle.rotation();
+
+  // Forward impulse (top-down: -Y is forward)
+  const impulse = {
+    x: Math.sin(a) * IMPULSE,
+    y: -Math.cos(a) * IMPULSE
+  };
+
+  const point = localToWorld(vehicle, offset);
+  vehicle.applyImpulseAtPoint(impulse, point, true);
+}
+
+/* ---------------- LOOP ---------------- */
+
+function update() {
+  if (keys["w"]) {
+    fireThruster(LEFT);
+    fireThruster(RIGHT);
+  }
+  if (keys["a"]) fireThruster(LEFT);
+  if (keys["d"]) fireThruster(RIGHT);
+
+  world.step();
+}
+
+function drawVehicle() {
+  const p = vehicle.translation();
+  const a = vehicle.rotation();
+
+  ctx.save();
+  ctx.translate(
+    canvas.width / 2 + p.x * SCALE,
+    canvas.height / 2 + p.y * SCALE
+  );
+  ctx.rotate(a);
+
+  // Body
+  ctx.fillStyle = "#4CAF50";
+  ctx.fillRect(
+    -SIZE * SCALE / 2,
+    -SIZE * SCALE / 2,
+     SIZE * SCALE,
+     SIZE * SCALE
+  );
+
+  // Thrusters
+  ctx.fillStyle = "#FF5722";
+  ctx.fillRect(-25, 25, 10, 10);
+  ctx.fillRect( 15, 25, 10, 10);
+
+  ctx.restore();
+}
+
+function loop() {
+  update();
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  drawVehicle();
+  requestAnimationFrame(loop);
+}
+
+loop();
+</script>
+</body>
+</html>

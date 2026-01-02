@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Rapier2D - Open World Thruster</title>
+<style>
+  body { margin: 0; overflow: hidden; background: #111; font-family: sans-serif; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+
+<script type="module">
+import RAPIER from "https://cdn.skypack.dev/@dimforge/rapier2d-compat";
+import { Pane } from "https://cdn.jsdelivr.net/npm/tweakpane@4.0.5/dist/tweakpane.min.js";
+
+await RAPIER.init();
+
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+
+function resize() {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+}
+window.addEventListener("resize", resize);
+resize();
+
+const SCALE = 60; 
+const SIZE = 1;   
+
+/* ---------------- PARAMETERS ---------------- */
+
+const params = {
+  thrustPower: 0.2,
+  worldWidth: 50,  // Meters
+  worldHeight: 50, // Meters
+  foodCount: 40,
+  linearDamping: 1.0,
+  angularDamping: 2.0,
+  gravityY: 0,
+  zoom: 1.0
+};
+
+/* ---------------- TWEAKPANE ---------------- */
+
+const pane = new Pane();
+const worldPane = pane.addFolder({ title: "World Settings" });
+worldPane.addBinding(params, "worldWidth", { min: 10, max: 200 });
+worldPane.addBinding(params, "worldHeight", { min: 10, max: 200 });
+worldPane.addBinding(params, "zoom", { min: 0.1, max: 2.0 });
+
+const shipPane = pane.addFolder({ title: "Ship" });
+shipPane.addBinding(params, "thrustPower", { min: 0, max: 1 });
+
+/* ---------------- PHYSICS & OBJECTS ---------------- */
+
+const world = new RAPIER.World({ x: 0, y: params.gravityY });
+
+// Vehicle
+const vehicle = world.createRigidBody(
+  RAPIER.RigidBodyDesc.dynamic()
+    .setTranslation(0, 0)
+    .setLinearDamping(params.linearDamping)
+    .setAngularDamping(params.angularDamping)
+);
+world.createCollider(RAPIER.ColliderDesc.cuboid(SIZE/2, SIZE/2), vehicle);
+
+// Food System
+let foodParticles = [];
+function spawnFood() {
+  while(foodParticles.length < params.foodCount) {
+    foodParticles.push({
+      x: (Math.random() - 0.5) * params.worldWidth,
+      y: (Math.random() - 0.5) * params.worldHeight,
+      size: 0.2
+    });
+  }
+}
+
+/* ---------------- LOGIC ---------------- */
+
+const keys = {};
+window.addEventListener("keydown", e => keys[e.key.toLowerCase()] = true);
+window.addEventListener("keyup",   e => keys[e.key.toLowerCase()] = false);
+
+function update() {
+  world.gravity.y = params.gravityY;
+  
+  // Controls
+  const a = vehicle.rotation();
+  if (keys["w"] || keys["a"] || keys["d"]) {
+    const power = params.thrustPower;
+    const impulse = { x: Math.sin(a) * power, y: -Math.cos(a) * power };
+    
+    if (keys["w"]) vehicle.applyImpulse(impulse, true);
+    if (keys["a"]) vehicle.applyTorqueImpulse(-0.05, true);
+    if (keys["d"]) vehicle.applyTorqueImpulse(0.05, true);
+  }
+
+  world.step();
+
+  // Wrap World Logic
+  let { x, y } = vehicle.translation();
+  const hw = params.worldWidth / 2;
+  const hh = params.worldHeight / 2;
+  if (x > hw) x = -hw; else if (x < -hw) x = hw;
+  if (y > hh) y = -hh; else if (y < -hh) y = hh;
+  vehicle.setTranslation({ x, y }, true);
+
+  // Eating Logic
+  foodParticles = foodParticles.filter(f => {
+    const dx = f.x - x;
+    const dy = f.y - y;
+    return Math.sqrt(dx*dx + dy*dy) > 0.7; // Collection radius
+  });
+  spawnFood();
+}
+
+/* ---------------- RENDER ---------------- */
+
+function drawMiniMap(vPos) {
+  const mapSize = 150;
+  const padding = 20;
+  ctx.save();
+  ctx.translate(canvas.width - mapSize - padding, padding);
+  
+  // Background
+  ctx.fillStyle = "rgba(0, 0, 0, 0.7)";
+  ctx.strokeStyle = "#555";
+  ctx.fillRect(0, 0, mapSize, mapSize);
+  ctx.strokeRect(0, 0, mapSize, mapSize);
+
+  // Map Scaling
+  const scaleX = mapSize / params.worldWidth;
+  const scaleY = mapSize / params.worldHeight;
+
+  // Draw Food on Map
+  ctx.fillStyle = "#FFD700";
+  foodParticles.forEach(f => {
+    ctx.fillRect((f.x + params.worldWidth/2) * scaleX, (f.y + params.worldHeight/2) * scaleY, 2, 2);
+  });
+
+  // Draw Player on Map
+  ctx.fillStyle = "#00FF00";
+  ctx.beginPath();
+  ctx.arc((vPos.x + params.worldWidth/2) * scaleX, (vPos.y + params.worldHeight/2) * scaleY, 3, 0, Math.PI*2);
+  ctx.fill();
+
+  ctx.restore();
+}
+
+function draw() {
+  const p = vehicle.translation();
+  const a = vehicle.rotation();
+  const viewScale = SCALE * params.zoom;
+
+  ctx.fillStyle = "#111";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  ctx.save();
+  // Move camera to center and follow vehicle
+  ctx.translate(canvas.width / 2, canvas.height / 2);
+  ctx.scale(params.zoom, params.zoom);
+  
+  // Offset everything by negative player position
+  const camX = -p.x * SCALE;
+  const camY = -p.y * SCALE;
+  ctx.translate(camX, camY);
+
+  // Draw World Boundary
+  ctx.strokeStyle = "#333";
+  ctx.strokeRect(-params.worldWidth/2 * SCALE, -params.worldHeight/2 * SCALE, params.worldWidth * SCALE, params.worldHeight * SCALE);
+
+  // Draw Food
+  ctx.fillStyle = "#FFD700";
+  foodParticles.forEach(f => {
+    ctx.beginPath();
+    ctx.arc(f.x * SCALE, f.y * SCALE, f.size * SCALE, 0, Math.PI*2);
+    ctx.fill();
+  });
+
+  // Draw Vehicle
+  ctx.save();
+  ctx.translate(p.x * SCALE, p.y * SCALE);
+  ctx.rotate(a);
+  ctx.fillStyle = "#4CAF50";
+  ctx.fillRect(-SIZE*SCALE/2, -SIZE*SCALE/2, SIZE*SCALE, SIZE*SCALE);
+  ctx.fillStyle = "#FFF"; // Front indicator
+  ctx.fillRect(-2, -SIZE*SCALE/2, 4, 10);
+  ctx.restore();
+
+  ctx.restore();
+
+  drawMiniMap(p);
+}
+
+function loop() {
+  update();
+  draw();
+  requestAnimationFrame(loop);
+}
+
+spawnFood();
+loop();
+</script>
+</body>
+</html>

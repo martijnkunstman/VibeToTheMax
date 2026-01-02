@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Rapier2D - Explorer with Mini-map</title>
+<style>
+  body { margin: 0; overflow: hidden; background: #111; font-family: 'Courier New', Courier, monospace; }
+  canvas { display: block; }
+  #hud {
+    position: absolute;
+    top: 20px;
+    left: 20px;
+    color: #00FF00;
+    font-size: 24px;
+    pointer-events: none;
+    text-shadow: 2px 2px 4px #000;
+  }
+  .tp-dfwv {
+    bottom: 20px !important;
+    top: auto !important;
+  }
+</style>
+</head>
+<body>
+<div id="hud">SCORE: 0</div>
+<canvas id="game"></canvas>
+
+<script type="module">
+import RAPIER from "https://cdn.skypack.dev/@dimforge/rapier2d-compat";
+import { Pane } from "https://cdn.jsdelivr.net/npm/tweakpane@4.0.5/dist/tweakpane.min.js";
+
+await RAPIER.init();
+
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+const hud = document.getElementById("hud");
+
+let score = 0;
+
+function resize() {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+}
+window.addEventListener("resize", resize);
+resize();
+
+const SCALE = 60; 
+const SIZE = 1;   
+
+/* ---------------- PARAMETERS ---------------- */
+
+const params = {
+  thrustPower: 0.2,
+  worldWidth: 60,
+  worldHeight: 60,
+  foodCount: 50,
+  zoom: 0.8,
+  showMiniMap: true
+};
+
+const pane = new Pane();
+const worldPane = pane.addFolder({ title: "World" });
+worldPane.addBinding(params, "worldWidth", { min: 20, max: 200 });
+worldPane.addBinding(params, "worldHeight", { min: 20, max: 200 });
+worldPane.addBinding(params, "zoom", { min: 0.1, max: 2.0 });
+
+const debugPane = pane.addFolder({ title: "UI" });
+debugPane.addBinding(params, "showMiniMap");
+
+/* ---------------- PHYSICS & OBJECTS ---------------- */
+
+const world = new RAPIER.World({ x: 0, y: 0 });
+
+const vehicle = world.createRigidBody(
+  RAPIER.RigidBodyDesc.dynamic()
+    .setTranslation(0, 0)
+    .setLinearDamping(1.0)
+    .setAngularDamping(2.0)
+);
+world.createCollider(RAPIER.ColliderDesc.cuboid(SIZE/2, SIZE/2), vehicle);
+
+let foodParticles = [];
+function spawnFood() {
+  while(foodParticles.length < params.foodCount) {
+    foodParticles.push({
+      x: (Math.random() - 0.5) * params.worldWidth,
+      y: (Math.random() - 0.5) * params.worldHeight,
+      id: Math.random()
+    });
+  }
+}
+
+/* ---------------- LOGIC ---------------- */
+
+const keys = {};
+window.addEventListener("keydown", e => keys[e.key.toLowerCase()] = true);
+window.addEventListener("keyup",   e => keys[e.key.toLowerCase()] = false);
+
+function update() {
+  const a = vehicle.rotation();
+  const power = params.thrustPower;
+  
+  if (keys["w"]) {
+    const impulse = { x: Math.sin(a) * power, y: -Math.cos(a) * power };
+    vehicle.applyImpulse(impulse, true);
+  }
+  if (keys["a"]) vehicle.applyTorqueImpulse(-0.08, true);
+  if (keys["d"]) vehicle.applyTorqueImpulse(0.08, true);
+
+  world.step();
+
+  // World Wrapping
+  let { x, y } = vehicle.translation();
+  const hw = params.worldWidth / 2;
+  const hh = params.worldHeight / 2;
+  
+  if (x > hw) x = -hw; else if (x < -hw) x = hw;
+  if (y > hh) y = -hh; else if (y < -hh) y = hh;
+  vehicle.setTranslation({ x, y }, true);
+
+  // Collection Logic
+  foodParticles = foodParticles.filter(f => {
+    const dist = Math.hypot(f.x - x, f.y - y);
+    if (dist < 0.8) {
+      score += 10;
+      hud.innerText = `SCORE: ${score}`;
+      return false;
+    }
+    return true;
+  });
+  spawnFood();
+}
+
+/* ---------------- RENDERING ---------------- */
+
+function drawMiniMap(vPos) {
+  if (!params.showMiniMap) return;
+
+  const mapSize = 180;
+  const padding = 20;
+  
+  ctx.save();
+  ctx.translate(canvas.width - mapSize - padding, padding);
+  
+  // Map Frame
+  ctx.fillStyle = "rgba(0, 40, 0, 0.6)";
+  ctx.strokeStyle = "#00FF00";
+  ctx.lineWidth = 2;
+  ctx.fillRect(0, 0, mapSize, mapSize);
+  ctx.strokeRect(0, 0, mapSize, mapSize);
+
+  // Scaling Factor
+  const sx = mapSize / params.worldWidth;
+  const sy = mapSize / params.worldHeight;
+
+  // Draw Food on Map
+  ctx.fillStyle = "#FFD700";
+  foodParticles.forEach(f => {
+    ctx.fillRect((f.x + params.worldWidth/2) * sx, (f.y + params.worldHeight/2) * sy, 2, 2);
+  });
+
+  // Draw Vehicle on Map
+  ctx.fillStyle = "#FFFFFF";
+  const mx = (vPos.x + params.worldWidth/2) * sx;
+  const my = (vPos.y + params.worldHeight/2) * sy;
+  ctx.beginPath();
+  ctx.arc(mx, my, 4, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.restore();
+}
+
+function draw() {
+  const p = vehicle.translation();
+  const a = vehicle.rotation();
+
+  ctx.fillStyle = "#0a0a0a";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  ctx.save();
+  // Camera Centering
+  ctx.translate(canvas.width / 2, canvas.height / 2);
+  ctx.scale(params.zoom, params.zoom);
+  ctx.translate(-p.x * SCALE, -p.y * SCALE);
+
+  // World Grid/Bounds
+  ctx.strokeStyle = "#1a3a1a";
+  ctx.lineWidth = 2;
+  ctx.strokeRect(-params.worldWidth/2 * SCALE, -params.worldHeight/2 * SCALE, params.worldWidth * SCALE, params.worldHeight * SCALE);
+
+  // Render Food
+  ctx.fillStyle = "#FFD700";
+  foodParticles.forEach(f => {
+    ctx.beginPath();
+    ctx.arc(f.x * SCALE, f.y * SCALE, 0.15 * SCALE, 0, Math.PI*2);
+    ctx.fill();
+    // Glow effect
+    ctx.shadowBlur = 10;
+    ctx.shadowColor = "#FFD700";
+  });
+  ctx.shadowBlur = 0;
+
+  // Render Vehicle
+  ctx.save();
+  ctx.translate(p.x * SCALE, p.y * SCALE);
+  ctx.rotate(a);
+  ctx.fillStyle = "#4CAF50";
+  ctx.fillRect(-SIZE*SCALE/2, -SIZE*SCALE/2, SIZE*SCALE, SIZE*SCALE);
+  ctx.fillStyle = "#00FF00"; // Directional highlight
+  ctx.fillRect(-2, -SIZE*SCALE/2, 4, 15);
+  ctx.restore();
+
+  ctx.restore();
+
+  drawMiniMap(p);
+}
+
+function loop() {
+  update();
+  draw();
+  requestAnimationFrame(loop);
+}
+
+spawnFood();
+loop();
+</script>
+</body>
+</html>
