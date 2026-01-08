@@ -1,0 +1,760 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <title>Neural Network Training - Toroidal AI Explorer</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/brain.js/2.0.0-beta.2/brain.min.js"></script>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background: #111;
+            font-family: 'Courier New', Courier, monospace;
+        }
+
+        canvas {
+            display: block;
+        }
+
+        #game {
+            position: absolute;
+            top: 0;
+            left: 0;
+        }
+
+        #network {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            width: 400px;
+            height: 200px;
+            border: 2px solid #00ffcc;
+            border-radius: 8px;
+            background: rgba(10, 10, 10, 0.95);
+        }
+
+        #hud {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            color: #00FF00;
+            font-size: 18px;
+            pointer-events: none;
+            text-shadow: 2px 2px 4px #000;
+            line-height: 1.5;
+        }
+
+        #controls {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            background: rgba(20, 20, 20, 0.95);
+            padding: 20px;
+            border-radius: 8px;
+            border: 2px solid #00ffcc;
+            color: #00ffcc;
+            min-width: 250px;
+        }
+
+        #controls h3 {
+            margin: 0 0 15px 0;
+            color: #00ff00;
+        }
+
+        #controls label {
+            display: block;
+            margin: 10px 0 5px 0;
+            font-size: 12px;
+        }
+
+        #controls input[type="range"] {
+            width: 100%;
+        }
+
+        #controls input[type="number"] {
+            width: 60px;
+            background: #222;
+            border: 1px solid #00ffcc;
+            color: #00ffcc;
+            padding: 3px;
+        }
+
+        #controls button {
+            width: 100%;
+            margin: 8px 0;
+            padding: 10px;
+            background: #00ffcc;
+            border: none;
+            border-radius: 4px;
+            color: #000;
+            font-weight: bold;
+            cursor: pointer;
+            font-family: 'Courier New', Courier, monospace;
+        }
+
+        #controls button:hover {
+            background: #00ff00;
+        }
+
+        .control-group {
+            margin-bottom: 15px;
+            padding-bottom: 15px;
+            border-bottom: 1px solid #333;
+        }
+
+        .value-display {
+            display: inline-block;
+            float: right;
+            color: #00ff00;
+        }
+    </style>
+</head>
+<body>
+    <div id="hud">Initializing...</div>
+    <canvas id="game"></canvas>
+    <canvas id="network"></canvas>
+    
+    <div id="controls">
+        <h3>Neural Network Training</h3>
+        
+        <div class="control-group">
+            <label>
+                Population Size: <span class="value-display" id="popVal">10</span>
+            </label>
+            <input type="range" id="populationSize" min="1" max="50" value="10" step="1">
+        </div>
+        
+        <div class="control-group">
+            <label>
+                Generation Time (s): <span class="value-display" id="genTimeVal">15</span>
+            </label>
+            <input type="range" id="generationTime" min="5" max="60" value="15" step="1">
+        </div>
+        
+        <div class="control-group">
+            <label>
+                Mutation Rate: <span class="value-display" id="mutRateVal">0.30</span>
+            </label>
+            <input type="range" id="mutationRate" min="0" max="1" value="0.3" step="0.05">
+        </div>
+        
+        <div class="control-group">
+            <label>
+                Sensors: <span class="value-display" id="sensorsVal">5</span>
+            </label>
+            <input type="range" id="numSensors" min="3" max="9" value="5" step="2">
+        </div>
+        
+        <div class="control-group">
+            <label>
+                <input type="checkbox" id="showSensors" checked> Show Sensors
+            </label>
+            <label>
+                <input type="checkbox" id="showNN" checked> Show Neural Net
+            </label>
+        </div>
+        
+        <button id="resetBtn">Reset Generation</button>
+        <button id="saveBtn">Save Best Brain</button>
+        <button id="loadBtn">Load Brain</button>
+    </div>
+
+    <script>
+        // Seeded Random
+        function mulberry32(seed) {
+            return function () {
+                let t = seed += 0x6D2B79F5;
+                t = Math.imul(t ^ (t >>> 15), t | 1);
+                t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+                return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+            };
+        }
+        Math.random = mulberry32(1337);
+
+        const canvas = document.getElementById("game");
+        const ctx = canvas.getContext("2d");
+        const hud = document.getElementById("hud");
+        const netCanvas = document.getElementById("network");
+        const netCtx = netCanvas.getContext("2d");
+
+        let generation = 0;
+        let vehicles = [];
+        let bestScore = 0;
+        let bestBrain = null;
+
+        function resize() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            netCanvas.width = 400;
+            netCanvas.height = 200;
+        }
+        window.addEventListener("resize", resize);
+        resize();
+
+        const SCALE = 60;
+
+        const params = {
+            thrustPower: 0.015,
+            worldWidth: 80,
+            worldHeight: 80,
+            foodCount: 60,
+            zoom: 0.8,
+            vWidth: 1.0,
+            vHeight: 1.0,
+            sensorRange: 35,
+            showSensors: true,
+            thrusterSize: 1.2,
+            populationSize: 10,
+            generationTime: 15,
+            mutationRate: 0.3,
+            numSensors: 5,
+            showNN: true
+        };
+
+        // Control panel bindings
+        document.getElementById('populationSize').addEventListener('input', (e) => {
+            params.populationSize = parseInt(e.target.value);
+            document.getElementById('popVal').textContent = params.populationSize;
+        });
+        
+        document.getElementById('generationTime').addEventListener('input', (e) => {
+            params.generationTime = parseInt(e.target.value);
+            document.getElementById('genTimeVal').textContent = params.generationTime;
+        });
+        
+        document.getElementById('mutationRate').addEventListener('input', (e) => {
+            params.mutationRate = parseFloat(e.target.value);
+            document.getElementById('mutRateVal').textContent = params.mutationRate.toFixed(2);
+        });
+        
+        document.getElementById('numSensors').addEventListener('input', (e) => {
+            params.numSensors = parseInt(e.target.value);
+            document.getElementById('sensorsVal').textContent = params.numSensors;
+        });
+        
+        document.getElementById('showSensors').addEventListener('change', (e) => {
+            params.showSensors = e.target.checked;
+        });
+        
+        document.getElementById('showNN').addEventListener('change', (e) => {
+            params.showNN = e.target.checked;
+        });
+
+        // Simple 2D physics
+        class Vehicle {
+            constructor(brain = null) {
+                this.x = (Math.random() - 0.5) * params.worldWidth * 0.8;
+                this.y = (Math.random() - 0.5) * params.worldHeight * 0.8;
+                this.vx = 0;
+                this.vy = 0;
+                this.angle = Math.random() * Math.PI * 2;
+                this.angularVel = 0;
+                
+                this.score = 0;
+                this.leftThrusterActive = false;
+                this.rightThrusterActive = false;
+                this.sensorReadings = [];
+                
+                if (brain) {
+                    this.brain = brain;
+                } else {
+                    this.brain = new brain.NeuralNetwork({
+                        hiddenLayers: [8, 6],
+                        activation: 'sigmoid'
+                    });
+                    this.brain.train([
+                        { input: Array(params.numSensors).fill(0), output: [0, 0] }
+                    ], { iterations: 1 });
+                }
+                
+                this.color = `hsl(${Math.random() * 360}, 70%, 50%)`;
+            }
+            
+            getSensorReadings(foodParticles) {
+                const sensorAngles = [];
+                const angleSpread = Math.PI / 2;
+                
+                for (let i = 0; i < params.numSensors; i++) {
+                    const angle = -angleSpread / 2 + (angleSpread / (params.numSensors - 1)) * i;
+                    sensorAngles.push(angle);
+                }
+                
+                this.sensorReadings = sensorAngles.map(angle => {
+                    const sensorAngle = this.angle + angle - Math.PI / 2;
+                    let minDist = params.sensorRange;
+                    
+                    foodParticles.forEach(f => {
+                        for (let ox = -1; ox <= 1; ox++) {
+                            for (let oy = -1; oy <= 1; oy++) {
+                                const vx = f.x + ox * params.worldWidth;
+                                const vy = f.y + oy * params.worldHeight;
+                                
+                                const dx = vx - this.x;
+                                const dy = vy - this.y;
+                                const dist = Math.hypot(dx, dy);
+                                
+                                if (dist < params.sensorRange) {
+                                    const angleToFood = Math.atan2(dy, dx);
+                                    const angleDiff = Math.abs(((angleToFood - sensorAngle + Math.PI) % (2 * Math.PI)) - Math.PI);
+                                    
+                                    if (angleDiff < 0.3 && dist < minDist) {
+                                        minDist = dist;
+                                    }
+                                }
+                            }
+                        }
+                    });
+                    
+                    return 1 - (minDist / params.sensorRange);
+                });
+                
+                return this.sensorReadings;
+            }
+            
+            think(foodParticles) {
+                const inputs = this.getSensorReadings(foodParticles);
+                const outputs = this.brain.run(inputs);
+                return outputs;
+            }
+            
+            update(foodParticles) {
+                this.leftThrusterActive = false;
+                this.rightThrusterActive = false;
+                
+                const [leftThrust, rightThrust] = this.think(foodParticles);
+                
+                const power = params.thrustPower;
+                
+                if (leftThrust > 0.5) {
+                    this.vx += Math.sin(this.angle) * power * leftThrust;
+                    this.vy += -Math.cos(this.angle) * power * leftThrust;
+                    this.leftThrusterActive = true;
+                }
+                
+                if (rightThrust > 0.5) {
+                    this.vx += Math.sin(this.angle) * power * rightThrust;
+                    this.vy += -Math.cos(this.angle) * power * rightThrust;
+                    this.rightThrusterActive = true;
+                }
+                
+                const torque = (rightThrust - leftThrust) * 0.003;
+                this.angularVel += torque;
+                
+                // Apply damping
+                this.vx *= 0.98;
+                this.vy *= 0.98;
+                this.angularVel *= 0.95;
+                
+                // Update position
+                this.x += this.vx;
+                this.y += this.vy;
+                this.angle += this.angularVel;
+                
+                // Wrapping
+                const ww = params.worldWidth;
+                const wh = params.worldHeight;
+                
+                if (this.x > ww / 2) this.x = -ww / 2;
+                else if (this.x < -ww / 2) this.x = ww / 2;
+                if (this.y > wh / 2) this.y = -wh / 2;
+                else if (this.y < -wh / 2) this.y = wh / 2;
+            }
+            
+            checkCollisions(foodParticles) {
+                const collectRad = Math.max(params.vWidth, params.vHeight) / 2 + 0.4;
+                
+                const remaining = [];
+                foodParticles.forEach(f => {
+                    if (Math.hypot(f.x - this.x, f.y - this.y) < collectRad) {
+                        this.score += 10;
+                    } else {
+                        remaining.push(f);
+                    }
+                });
+                
+                return remaining;
+            }
+            
+            copyBrain() {
+                const newBrain = new brain.NeuralNetwork({
+                    hiddenLayers: [8, 6],
+                    activation: 'sigmoid'
+                });
+                newBrain.fromJSON(this.brain.toJSON());
+                return newBrain;
+            }
+            
+            mutate(rate) {
+                const json = this.brain.toJSON();
+                
+                const mutateArray = (arr) => {
+                    return arr.map(layer => {
+                        if (Array.isArray(layer)) {
+                            return mutateArray(layer);
+                        } else if (typeof layer === 'number') {
+                            if (Math.random() < rate) {
+                                return layer + (Math.random() - 0.5) * 0.5;
+                            }
+                            return layer;
+                        }
+                        return layer;
+                    });
+                };
+                
+                if (json.weights) {
+                    json.weights = mutateArray(json.weights);
+                }
+                if (json.biases) {
+                    json.biases = mutateArray(json.biases);
+                }
+                
+                this.brain.fromJSON(json);
+            }
+        }
+
+        let foodParticles = [];
+        function spawnFood() {
+            while (foodParticles.length < params.foodCount) {
+                foodParticles.push({
+                    x: (Math.random() - 0.5) * params.worldWidth,
+                    y: (Math.random() - 0.5) * params.worldHeight
+                });
+            }
+        }
+
+        function createGeneration() {
+            vehicles = [];
+            
+            for (let i = 0; i < params.populationSize; i++) {
+                if (i === 0 && bestBrain) {
+                    vehicles.push(new Vehicle(bestBrain.copyBrain()));
+                } else if (bestBrain && Math.random() < 0.7) {
+                    const brain = bestBrain.copyBrain();
+                    const v = new Vehicle(brain);
+                    v.mutate(params.mutationRate);
+                    vehicles.push(v);
+                } else {
+                    vehicles.push(new Vehicle());
+                }
+            }
+            
+            generation++;
+        }
+
+        function resetGeneration() {
+            generation = 0;
+            bestScore = 0;
+            bestBrain = null;
+            createGeneration();
+        }
+
+        function saveBrain() {
+            if (bestBrain) {
+                const json = bestBrain.brain.toJSON();
+                const dataStr = JSON.stringify(json);
+                const blob = new Blob([dataStr], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `brain_gen${generation}_score${bestScore}.json`;
+                a.click();
+                URL.revokeObjectURL(url);
+            }
+        }
+
+        function loadBrain() {
+            const input = document.createElement('input');
+            input.type = 'file';
+            input.accept = '.json';
+            input.onchange = (e) => {
+                const file = e.target.files[0];
+                const reader = new FileReader();
+                reader.onload = (event) => {
+                    try {
+                        const json = JSON.parse(event.target.result);
+                        const newBrain = new brain.NeuralNetwork({
+                            hiddenLayers: [8, 6],
+                            activation: 'sigmoid'
+                        });
+                        newBrain.fromJSON(json);
+                        bestBrain = new Vehicle(newBrain);
+                        createGeneration();
+                    } catch (err) {
+                        console.error('Failed to load brain:', err);
+                    }
+                };
+                reader.readAsText(file);
+            };
+            input.click();
+        }
+
+        document.getElementById('resetBtn').addEventListener('click', resetGeneration);
+        document.getElementById('saveBtn').addEventListener('click', saveBrain);
+        document.getElementById('loadBtn').addEventListener('click', loadBrain);
+
+        let generationStartTime = Date.now();
+
+        function update() {
+            if (Date.now() - generationStartTime > params.generationTime * 1000) {
+                let best = vehicles[0];
+                vehicles.forEach(v => {
+                    if (v.score > best.score) best = v;
+                });
+                
+                if (best.score > bestScore) {
+                    bestScore = best.score;
+                    bestBrain = best;
+                }
+                
+                createGeneration();
+                generationStartTime = Date.now();
+            }
+            
+            vehicles.forEach(v => {
+                v.update(foodParticles);
+                foodParticles = v.checkCollisions(foodParticles);
+            });
+            
+            spawnFood();
+            
+            const avgScore = vehicles.reduce((sum, v) => sum + v.score, 0) / vehicles.length;
+            const maxScore = Math.max(...vehicles.map(v => v.score));
+            const timeLeft = Math.max(0, params.generationTime - (Date.now() - generationStartTime) / 1000);
+            hud.innerHTML = `
+                GEN: ${generation} | Best Ever: ${bestScore}<br>
+                Current Max: ${maxScore.toFixed(0)} | Avg: ${avgScore.toFixed(1)}<br>
+                Time Left: ${timeLeft.toFixed(1)}s
+            `;
+        }
+
+        function drawFlame(x, y, angle) {
+            ctx.save();
+            ctx.translate(x, y);
+            ctx.rotate(angle);
+            
+            const flicker = 0.8 + Math.random() * 0.4;
+            const grad = ctx.createLinearGradient(0, 0, 0, params.thrusterSize * SCALE * flicker);
+            grad.addColorStop(0, "white"); 
+            grad.addColorStop(0.2, "#ffaa00"); 
+            grad.addColorStop(1, "transparent");
+            ctx.fillStyle = grad;
+            ctx.beginPath(); 
+            
+            const tx = params.vWidth * 0.35;
+            ctx.moveTo(-0.12 * SCALE, 0); 
+            ctx.quadraticCurveTo(0, params.thrusterSize * SCALE * flicker, 0.12 * SCALE, 0); 
+            ctx.fill();
+            ctx.restore();
+        }
+
+        function drawVehicle(vehicle) {
+            ctx.save();
+            ctx.translate(vehicle.x * SCALE, vehicle.y * SCALE);
+            ctx.rotate(vehicle.angle);
+            
+            if (params.showSensors && vehicle.sensorReadings.length > 0) {
+                const angleSpread = Math.PI / 2;
+                vehicle.sensorReadings.forEach((reading, i) => {
+                    const angle = -angleSpread / 2 + (angleSpread / (params.numSensors - 1)) * i - Math.PI / 2;
+                    const length = reading * params.sensorRange;
+                    
+                    ctx.strokeStyle = `rgba(0, 255, 255, ${reading})`;
+                    ctx.lineWidth = 2;
+                    ctx.beginPath();
+                    ctx.moveTo(0, 0);
+                    ctx.lineTo(Math.cos(angle) * length * SCALE, Math.sin(angle) * length * SCALE);
+                    ctx.stroke();
+                });
+            }
+            
+            const tx = params.vWidth * 0.35;
+            const ty = params.vHeight / 2;
+            if (vehicle.leftThrusterActive) {
+                drawFlame(-tx * SCALE, ty * SCALE, vehicle.angle);
+            }
+            if (vehicle.rightThrusterActive) {
+                drawFlame(tx * SCALE, ty * SCALE, vehicle.angle);
+            }
+            
+            ctx.fillStyle = vehicle.color;
+            ctx.fillRect(-params.vWidth * SCALE / 2, -params.vHeight * SCALE / 2, params.vWidth * SCALE, params.vHeight * SCALE);
+            ctx.fillStyle = "#222";
+            ctx.fillRect(-params.vWidth * 0.3 * SCALE, -params.vHeight * 0.4 * SCALE, params.vWidth * 0.6 * SCALE, params.vHeight * 0.3 * SCALE);
+            
+            ctx.restore();
+        }
+
+        function drawMiniMap(focusVehicle) {
+            const mapSize = 180;
+            const pad = 20;
+            ctx.save();
+            ctx.translate(canvas.width - mapSize - pad, pad);
+            ctx.fillStyle = "rgba(0, 40, 0, 0.8)"; 
+            ctx.fillRect(0, 0, mapSize, mapSize);
+            ctx.strokeStyle = "#00ffcc"; 
+            ctx.strokeRect(0, 0, mapSize, mapSize);
+
+            const sx = mapSize / params.worldWidth; 
+            const sy = mapSize / params.worldHeight;
+            const ox = params.worldWidth / 2; 
+            const oy = params.worldHeight / 2;
+
+            foodParticles.forEach(f => {
+                ctx.fillStyle = "#FFD700";
+                ctx.fillRect((f.x + ox) * sx - 1, (f.y + oy) * sy - 1, 2, 2);
+            });
+
+            vehicles.forEach(v => {
+                ctx.fillStyle = v.color;
+                ctx.globalAlpha = 0.7;
+                ctx.beginPath(); 
+                ctx.arc((v.x + ox) * sx, (v.y + oy) * sy, 3, 0, Math.PI * 2); 
+                ctx.fill();
+                ctx.globalAlpha = 1.0;
+            });
+
+            ctx.strokeStyle = "white";
+            ctx.lineWidth = 2;
+            ctx.beginPath(); 
+            ctx.arc((focusVehicle.x + ox) * sx, (focusVehicle.y + oy) * sy, 5, 0, Math.PI * 2); 
+            ctx.stroke();
+            
+            ctx.restore();
+        }
+
+        function drawScene() {
+            ctx.fillStyle = "#0a0a0a";
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            
+            let focusVehicle = vehicles[0];
+            vehicles.forEach(v => {
+                if (v.score > focusVehicle.score) focusVehicle = v;
+            });
+            
+            ctx.save();
+            ctx.translate(canvas.width / 2, canvas.height / 2);
+            ctx.scale(params.zoom, params.zoom);
+            ctx.translate(-focusVehicle.x * SCALE, -focusVehicle.y * SCALE);
+            
+            ctx.strokeStyle = "#1a3a1a";
+            ctx.strokeRect(-params.worldWidth / 2 * SCALE, -params.worldHeight / 2 * SCALE, params.worldWidth * SCALE, params.worldHeight * SCALE);
+            
+            const ww = params.worldWidth;
+            const wh = params.worldHeight;
+            
+            ctx.fillStyle = "#FFD700";
+            foodParticles.forEach(f => {
+                ctx.beginPath();
+                ctx.arc(f.x * SCALE, f.y * SCALE, 0.15 * SCALE, 0, Math.PI * 2);
+                ctx.fill();
+                
+                const drawGhost = (ox, oy) => {
+                    ctx.globalAlpha = 0.8;
+                    ctx.beginPath();
+                    ctx.arc((f.x + ox * ww) * SCALE, (f.y + oy * wh) * SCALE, 0.15 * SCALE, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.globalAlpha = 1.0;
+                };
+                
+                for (let ox = -1; ox <= 1; ox++) {
+                    for (let oy = -1; oy <= 1; oy++) {
+                        if (ox === 0 && oy === 0) continue;
+                        drawGhost(ox, oy);
+                    }
+                }
+            });
+            
+            vehicles.forEach(v => drawVehicle(v));
+            
+            ctx.restore();
+            
+            drawMiniMap(focusVehicle);
+        }
+
+        function drawNeuralNetwork() {
+            if (!params.showNN || vehicles.length === 0) {
+                netCtx.clearRect(0, 0, netCanvas.width, netCanvas.height);
+                return;
+            }
+            
+            const bestVehicle = vehicles.reduce((best, v) => v.score > best.score ? v : best, vehicles[0]);
+            
+            netCtx.fillStyle = "rgba(10, 10, 10, 0.95)";
+            netCtx.fillRect(0, 0, netCanvas.width, netCanvas.height);
+            
+            const layers = [params.numSensors, 8, 6, 2];
+            const layerSpacing = netCanvas.width / (layers.length + 1);
+            const nodePositions = [];
+            
+            layers.forEach((nodeCount, layerIdx) => {
+                const layerNodes = [];
+                const nodeSpacing = netCanvas.height / (nodeCount + 1);
+                
+                for (let i = 0; i < nodeCount; i++) {
+                    layerNodes.push({
+                        x: layerSpacing * (layerIdx + 1),
+                        y: nodeSpacing * (i + 1)
+                    });
+                }
+                nodePositions.push(layerNodes);
+            });
+            
+            for (let l = 0; l < nodePositions.length - 1; l++) {
+                const currentLayer = nodePositions[l];
+                const nextLayer = nodePositions[l + 1];
+                
+                currentLayer.forEach(node1 => {
+                    nextLayer.forEach(node2 => {
+                        netCtx.strokeStyle = "rgba(100, 200, 255, 0.2)";
+                        netCtx.lineWidth = 0.5;
+                        netCtx.beginPath();
+                        netCtx.moveTo(node1.x, node1.y);
+                        netCtx.lineTo(node2.x, node2.y);
+                        netCtx.stroke();
+                    });
+                });
+            }
+            
+            nodePositions.forEach((layer, layerIdx) => {
+                layer.forEach((node, nodeIdx) => {
+                    let value = 0;
+                    
+                    if (layerIdx === 0) {
+                        value = bestVehicle.sensorReadings[nodeIdx] || 0;
+                    } else if (layerIdx === nodePositions.length - 1) {
+                        const outputs = bestVehicle.think(foodParticles);
+                        value = outputs[nodeIdx];
+                    } else {
+                        value = 0.5;
+                    }
+                    
+                    netCtx.fillStyle = `rgb(${value * 255}, ${value * 200}, ${value * 100})`;
+                    netCtx.beginPath();
+                    netCtx.arc(node.x, node.y, 8, 0, Math.PI * 2);
+                    netCtx.fill();
+                    
+                    netCtx.strokeStyle = "#00ffcc";
+                    netCtx.lineWidth = 2;
+                    netCtx.stroke();
+                });
+            });
+            
+            netCtx.fillStyle = "#00ffcc";
+            netCtx.font = "12px monospace";
+            netCtx.fillText("Sensors", 10, 20);
+            netCtx.fillText("L/R Thrust", netCanvas.width - 70, 20);
+        }
+
+        function loop() {
+            update();
+            drawScene();
+            drawNeuralNetwork();
+            requestAnimationFrame(loop);
+        }
+
+        spawnFood();
+        createGeneration();
+        loop();
+    </script>
+</body>
+</html>

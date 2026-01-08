@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>AI Thruster Vehicle - Training</title>
+    <style>
+        body { margin: 0; background: #1a1a1a; color: #0f0; font-family: 'Courier New', monospace; display: flex; overflow: hidden; }
+        #sidebar { width: 300px; padding: 20px; border-right: 1px solid #333; background: #111; z-index: 10; }
+        canvas { background: #000; cursor: crosshair; }
+        .stat { margin-bottom: 5px; font-size: 14px; color: #fff; }
+        h2 { color: #0f0; margin-top: 0; border-bottom: 1px solid #0f0; }
+    </style>
+</head>
+<body>
+    <div id="sidebar">
+        <h2>AUTO-PILOT v1.0</h2>
+        <div class="stat">Generation: <span id="gen">1</span></div>
+        <div class="stat">Best Score: <span id="fitness">0</span></div>
+        <div class="stat">Alive: <span id="aliveCount">10</span></div>
+        <hr>
+        <canvas id="nnCanvas" width="260" height="200"></canvas>
+        <p><small style="color: #888;">The vehicle uses 5 sensors to see Food (Green) and Poison (Red). It learns to balance Left/Right thrusters to survive.</small></p>
+    </div>
+    <canvas id="simCanvas"></canvas>
+
+<script>
+const canvas = document.getElementById('simCanvas');
+const ctx = canvas.getContext('2d');
+const nnCanvas = document.getElementById('nnCanvas');
+const nnCtx = nnCanvas.getContext('2d');
+
+canvas.width = window.innerWidth - 300;
+canvas.height = window.innerHeight;
+
+// --- Neural Network ---
+class NeuralNetwork {
+    constructor(inputNodes, hiddenNodes, outputNodes) {
+        this.inputNodes = inputNodes;
+        this.hiddenNodes = hiddenNodes;
+        this.outputNodes = outputNodes;
+        this.weights1 = Array.from({length: hiddenNodes}, () => Array(inputNodes).fill(0).map(() => Math.random() * 2 - 1));
+        this.weights2 = Array.from({length: outputNodes}, () => Array(hiddenNodes).fill(0).map(() => Math.random() * 2 - 1));
+        this.lastHidden = [];
+        this.lastInputs = [];
+    }
+
+    predict(inputs) {
+        this.lastInputs = inputs;
+        this.lastHidden = this.weights1.map(nodeWeights => 
+            this.activate(nodeWeights.reduce((sum, w, i) => sum + w * inputs[i], 0)));
+        return this.weights2.map(nodeWeights => 
+            this.activate(nodeWeights.reduce((sum, w, i) => sum + w * this.lastHidden[i], 0)));
+    }
+
+    activate(x) { return 1 / (1 + Math.exp(-x)); }
+
+    mutate(rate) {
+        const mut = (v) => Math.random() < rate ? v + (Math.random() * 2 - 1) * 0.5 : v;
+        this.weights1 = this.weights1.map(row => row.map(mut));
+        this.weights2 = this.weights2.map(row => row.map(mut));
+    }
+}
+
+// --- Entity ---
+class Vehicle {
+    constructor(brain = null) {
+        this.reset();
+        this.brain = brain || new NeuralNetwork(5, 6, 2);
+    }
+
+    reset() {
+        this.x = canvas.width / 2;
+        this.y = canvas.height / 2;
+        this.angle = Math.random() * Math.PI * 2;
+        this.health = 100;
+        this.fitness = 0;
+        this.dead = false;
+        this.sensors = [0, 0, 0, 0, 0];
+    }
+
+    update() {
+        if (this.dead) return;
+
+        // 1. Raycasting Sensors
+        const sensorAngles = [-0.6, -0.3, 0, 0.3, 0.6];
+        this.sensors = sensorAngles.map(off => {
+            let closest = 1.0;
+            const rayX = Math.cos(this.angle + off);
+            const rayY = Math.sin(this.angle + off);
+            
+            // Check Food (Positive impact) and Obstacles (Negative impact)
+            obstacles.forEach(o => {
+                const dx = o.x - this.x;
+                const dy = o.y - this.y;
+                const dist = Math.sqrt(dx*dx + dy*dy);
+                const dot = (dx/dist) * rayX + (dy/dist) * rayY;
+                if (dot > 0.95 && dist < 150) closest = Math.min(closest, dist/150);
+            });
+            return 1 - closest; // Closer = higher signal
+        });
+
+        // 2. Think
+        const [lThrust, rThrust] = this.brain.predict(this.sensors);
+
+        // 3. Move
+        this.angle += (lThrust - rThrust) * 0.1;
+        const speed = (lThrust + rThrust) * 3;
+        this.x += Math.cos(this.angle) * speed;
+        this.y += Math.sin(this.angle) * speed;
+
+        // 4. Collisions & Life
+        this.health -= 0.1; // Passive decay
+        
+        // Wall collision
+        if (this.x < 0 || this.x > canvas.width || this.y < 0 || this.y > canvas.height) this.die();
+
+        // Food/Poison collision
+        food.forEach((f, i) => {
+            if (Math.hypot(f.x - this.x, f.y - this.y) < 15) {
+                this.health += 30;
+                this.fitness += 50;
+                food[i] = { x: Math.random()*canvas.width, y: Math.random()*canvas.height };
+            }
+        });
+        
+        obstacles.forEach(o => {
+            if (Math.hypot(o.x - this.x, o.y - this.y) < 15) this.die();
+        });
+
+        if (this.health <= 0) this.die();
+        this.fitness++;
+    }
+
+    die() { this.dead = true; this.health = 0; }
+
+    draw() {
+        if (this.dead) return;
+        ctx.save();
+        ctx.translate(this.x, this.y);
+        ctx.rotate(this.angle);
+        
+        // Sensors
+        ctx.strokeStyle = "rgba(0, 255, 0, 0.1)";
+        this.sensors.forEach((s, i) => {
+            ctx.beginPath();
+            ctx.moveTo(0,0);
+            ctx.lineTo(50, (i-2)*10);
+            ctx.stroke();
+        });
+
+        ctx.fillStyle = 'cyan';
+        ctx.beginPath(); ctx.moveTo(10,0); ctx.lineTo(-10,-8); ctx.lineTo(-10,8); ctx.fill();
+        ctx.restore();
+    }
+}
+
+// --- Sim Controller ---
+let vehicles = Array.from({length: 12}, () => new Vehicle());
+let food = Array.from({length: 20}, () => ({x: Math.random()*canvas.width, y: Math.random()*canvas.height}));
+let obstacles = Array.from({length: 10}, () => ({x: Math.random()*canvas.width, y: Math.random()*canvas.height}));
+let gen = 1;
+
+function drawNN(brain) {
+    nnCtx.clearRect(0,0,260,200);
+    const drawNode = (x, y, val) => {
+        nnCtx.fillStyle = `rgb(0, ${val*255}, 0)`;
+        nnCtx.beginPath(); nnCtx.arc(x, y, 6, 0, 7); nnCtx.fill();
+        nnCtx.strokeStyle = "#fff"; nnCtx.stroke();
+    };
+    // Draw Weights (simplified)
+    nnCtx.strokeStyle = "rgba(255,255,255,0.1)";
+    for(let i=0; i<5; i++) for(let j=0; j<6; j++) {
+        nnCtx.beginPath(); nnCtx.moveTo(30, 30+i*35); nnCtx.lineTo(130, 15+j*30); nnCtx.stroke();
+    }
+    // Draw Nodes
+    brain.lastInputs.forEach((v, i) => drawNode(30, 30+i*35, v));
+    brain.lastHidden.forEach((v, i) => drawNode(130, 15+i*30, v));
+}
+
+function update() {
+    ctx.fillStyle = "rgba(0,0,0,0.2)"; // Trail effect
+    ctx.fillRect(0,0,canvas.width, canvas.height);
+
+    food.forEach(f => { ctx.fillStyle = "#0f0"; ctx.beginPath(); ctx.arc(f.x, f.y, 5, 0, 7); ctx.fill(); });
+    obstacles.forEach(o => { ctx.fillStyle = "#f00"; ctx.fillRect(o.x-8, o.y-8, 16, 16); });
+
+    let alive = vehicles.filter(v => !v.dead);
+    document.getElementById('aliveCount').innerText = alive.length;
+
+    alive.forEach(v => {
+        v.update();
+        v.draw();
+    });
+
+    if (alive.length > 0) drawNN(alive[0].brain);
+
+    if (alive.length === 0) {
+        // Evolve
+        let best = vehicles.sort((a,b) => b.fitness - a.fitness)[0];
+        document.getElementById('fitness').innerText = Math.round(best.fitness);
+        vehicles = vehicles.map(() => {
+            let v = new Vehicle(new NeuralNetwork(5, 6, 2));
+            // Inherit best brain
+            v.brain.weights1 = JSON.parse(JSON.stringify(best.brain.weights1));
+            v.brain.weights2 = JSON.parse(JSON.stringify(best.brain.weights2));
+            v.brain.mutate(0.1);
+            return v;
+        });
+        gen++;
+        document.getElementById('gen').innerText = gen;
+    }
+    requestAnimationFrame(update);
+}
+
+update();
+</script>
+</body>
+</html>

@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Toroidal AI Explorer – GPU NN</title>
+
+<script src="https://cdn.jsdelivr.net/npm/gpu.js@2.16.0/dist/gpu-browser.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/synaptic/1.1.4/synaptic.min.js"></script>
+
+<style>
+body { margin:0; overflow:hidden; background:#0b0b0b; font-family:monospace }
+canvas { display:block }
+#hud {
+    position:absolute; top:15px; left:50%;
+    transform:translateX(-50%);
+    background:rgba(0,0,0,.75);
+    color:#00ff99; padding:10px 18px;
+    border:2px solid #00ff99; border-radius:8px;
+}
+</style>
+</head>
+<body>
+
+<div id="hud">Initializing…</div>
+<canvas id="game"></canvas>
+
+<script defer>
+/* ==================== CORE ==================== */
+const { Layer, Network } = synaptic;
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+const hud = document.getElementById("hud");
+
+function resize(){
+    canvas.width = innerWidth;
+    canvas.height = innerHeight;
+}
+addEventListener("resize", resize);
+resize();
+
+const GPUConstructor =
+    window.GPU?.GPU ||
+    window.GPU ||
+    GPU;
+
+const gpu = new GPUConstructor();
+
+const SCALE = 60;
+
+
+/* ==================== PARAMS ==================== */
+const P = {
+    population: 60,
+    sensors: 7,
+    hidden: 8,
+    outputs: 2,
+    mutation: 0.3,
+    generationTime: 15,
+    world: 80,
+    food: 40,
+    sensorRange: 35,
+    thrust: 0.015
+};
+
+/* ==================== SENSOR ANGLES ==================== */
+let sensorAngles = [];
+function updateSensorAngles(){
+    sensorAngles.length = 0;
+    const spread = Math.PI / 2;
+    for(let i=0;i<P.sensors;i++){
+        sensorAngles.push(-spread/2 + spread*i/(P.sensors-1));
+    }
+}
+updateSensorAngles();
+
+/* ==================== GPU KERNEL ==================== */
+const nnKernel = gpu.createKernel(function(inputs, ih, ho) {
+    const v = this.thread.y;
+    const o = this.thread.x;
+
+    let sum = 0.0;
+    for (let h = 0; h < this.constants.H; h++) {
+        let hidden = 0.0;
+        for (let i = 0; i < this.constants.I; i++) {
+            hidden += inputs[v][i] * ih[v][h][i];
+        }
+        hidden = 1.0 / (1.0 + Math.exp(-hidden));
+        sum += hidden * ho[v][o][h];
+    }
+    return 1.0 / (1.0 + Math.exp(-sum));
+},{
+    output:[P.outputs, P.population],
+    constants:{ I:P.sensors, H:P.hidden }
+});
+
+/* ==================== BRAIN ==================== */
+function createBrain(){
+    const i = new Layer(P.sensors);
+    const h = new Layer(P.hidden);
+    const o = new Layer(P.outputs);
+    i.project(h); h.project(o);
+    return new Network({ input:i, hidden:[h], output:o });
+}
+
+function extractWeights(brain){
+    const j = brain.toJSON();
+    const ih = Array(P.hidden).fill(0).map(()=>Array(P.sensors).fill(0));
+    const ho = Array(P.outputs).fill(0).map(()=>Array(P.hidden).fill(0));
+
+    for(const k in j.connections){
+        const c = j.connections[k];
+        if(c.from < P.sensors && c.to < P.sensors + P.hidden){
+            ih[c.to-P.sensors][c.from] = c.weight;
+        }
+        if(c.from >= P.sensors && c.to >= P.sensors + P.hidden){
+            ho[c.to-(P.sensors+P.hidden)][c.from-P.sensors] = c.weight;
+        }
+    }
+    return { ih, ho };
+}
+
+/* ==================== VEHICLE ==================== */
+class Vehicle {
+    constructor(brain){
+        this.x=(Math.random()-.5)*P.world;
+        this.y=(Math.random()-.5)*P.world;
+        this.vx=this.vy=0;
+        this.a=Math.random()*Math.PI*2;
+        this.av=0;
+        this.score=0;
+        this.brain=brain||createBrain();
+        this.weights=extractWeights(this.brain);
+        this.sensors=new Float32Array(P.sensors);
+        this.out=[0,0];
+    }
+
+    sense(food){
+        for(let i=0;i<P.sensors;i++){
+            let min=P.sensorRange;
+            const sa=this.a+sensorAngles[i]-Math.PI/2;
+            for(const f of food){
+                const dx=f.x-this.x, dy=f.y-this.y;
+                const d=Math.hypot(dx,dy);
+                if(d>=min||d>P.sensorRange) continue;
+                const da=Math.abs(((Math.atan2(dy,dx)-sa+Math.PI)%(2*Math.PI))-Math.PI);
+                if(da<0.3) min=d;
+            }
+            this.sensors[i]=1-min/P.sensorRange;
+        }
+    }
+
+    apply(){
+        const L=this.out[0], R=this.out[1];
+        const p=P.thrust;
+        this.vx+=Math.sin(this.a)*(L+R)*p;
+        this.vy+=-Math.cos(this.a)*(L+R)*p;
+        this.av+=(R-L)*0.008;
+        this.vx*=.98; this.vy*=.98; this.av*=.95;
+        this.x+=this.vx; this.y+=this.vy; this.a+=this.av;
+        const w=P.world/2;
+        if(this.x>w) this.x=-w; if(this.x<-w) this.x=w;
+        if(this.y>w) this.y=-w; if(this.y<-w) this.y=w;
+    }
+}
+
+/* ==================== WORLD ==================== */
+let food=[];
+function spawnFood(){
+    while(food.length<P.food){
+        food.push({
+            x:(Math.random()-.5)*P.world,
+            y:(Math.random()-.5)*P.world
+        });
+    }
+}
+
+/* ==================== EVOLUTION ==================== */
+let vehicles=[], best=null, bestScore=0;
+let generation=0, genStart=Date.now();
+
+function mutate(brain){
+    const j=brain.toJSON();
+    for(const k in j.connections)
+        if(Math.random()<P.mutation)
+            j.connections[k].weight+=(Math.random()*2-1)*0.5;
+    return Network.fromJSON(j);
+}
+
+function createGeneration(){
+    vehicles=[];
+    for(let i=0;i<P.population;i++){
+        if(best && i===0){
+            vehicles.push(new Vehicle(Network.fromJSON(best.brain.toJSON())));
+        } else if(best){
+            vehicles.push(new Vehicle(mutate(best.brain)));
+        } else {
+            vehicles.push(new Vehicle());
+        }
+    }
+    generation++;
+    genStart=Date.now();
+}
+
+/* ==================== DRAW ==================== */
+function draw(){
+    ctx.fillStyle="#0a0a0a";
+    ctx.fillRect(0,0,canvas.width,canvas.height);
+
+    const f=vehicles.reduce((a,b)=>b.score>a.score?b:a,vehicles[0]);
+    ctx.save();
+    ctx.translate(canvas.width/2,canvas.height/2);
+    ctx.translate(-f.x*SCALE,-f.y*SCALE);
+
+    ctx.fillStyle="#ffd700";
+    for(const p of food){
+        ctx.beginPath();
+        ctx.arc(p.x*SCALE,p.y*SCALE,6,0,Math.PI*2);
+        ctx.fill();
+    }
+
+    ctx.fillStyle="#00ffcc";
+    for(const v of vehicles){
+        ctx.save();
+        ctx.translate(v.x*SCALE,v.y*SCALE);
+        ctx.rotate(v.a);
+        ctx.fillRect(-12,-12,24,24);
+        ctx.restore();
+    }
+    ctx.restore();
+}
+
+/* ==================== LOOP ==================== */
+function loop(){
+    if(Date.now()-genStart > P.generationTime*1000){
+        const b=vehicles.reduce((a,b)=>b.score>a.score?b:a);
+        if(b.score>bestScore){ best=b; bestScore=b.score; }
+        createGeneration();
+    }
+
+    const inputs=[], ih=[], ho=[];
+    for(const v of vehicles){
+        v.sense(food);
+        inputs.push([...v.sensors]);
+        ih.push(v.weights.ih);
+        ho.push(v.weights.ho);
+    }
+
+    const outputs = nnKernel(inputs, ih, ho);
+
+    for(let i=0;i<vehicles.length;i++){
+        vehicles[i].out[0]=outputs[0][i];
+        vehicles[i].out[1]=outputs[1][i];
+        vehicles[i].apply();
+    }
+
+    spawnFood();
+    draw();
+    hud.innerHTML=`GEN ${generation} | BEST ${bestScore}`;
+    requestAnimationFrame(loop);
+}
+
+/* ==================== START ==================== */
+spawnFood();
+createGeneration();
+loop();
+</script>
+</body>
+</html>

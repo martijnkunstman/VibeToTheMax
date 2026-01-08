@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>AI Evolution - Lifespan & HUD Fix</title>
+    <style>
+        body { margin: 0; background: #000; color: #0f0; font-family: 'Courier New', monospace; display: flex; overflow: hidden; }
+        #sidebar { width: 340px; padding: 20px; border-right: 2px solid #0f0; background: #080808; z-index: 10; height: 100vh; display: flex; flex-direction: column; }
+        canvas { background: #000; flex-grow: 1; }
+        .stat { margin-bottom: 8px; font-size: 13px; border-left: 2px solid #0f0; padding-left: 10px; color: #fff; }
+        .label { color: #0f0; font-weight: bold; margin-top: 15px; display: block; font-size: 10px; text-transform: uppercase; letter-spacing: 1px; }
+        #miniMap { background: #000; border: 1px solid #333; margin-top: 5px; flex-shrink: 0; }
+        #nnCanvas { background: #050505; border: 1px solid #222; margin-top: 5px; flex-grow: 1; }
+        button { background: #0f0; color: #000; border: none; padding: 10px; cursor: pointer; width: 100%; margin-top: 15px; font-weight: bold; }
+        h2 { margin: 0 0 15px 0; font-size: 1.2em; border-bottom: 1px solid #333; padding-bottom: 5px; }
+        #save-indicator { font-size: 10px; color: #888; margin-top: 5px; text-align: center; }
+    </style>
+</head>
+<body>
+    <div id="sidebar">
+        <h2>NEURAL_PILOT_V9</h2>
+        <div class="stat">GENERATION: <span id="genHUD">1</span></div>
+        <div class="stat">ELITE FITNESS: <span id="fitness">0</span></div>
+        <div class="stat">ACTIVE UNITS: <span id="aliveCount">0</span></div>
+        
+        <span class="label">Radar (4000x4000)</span>
+        <canvas id="miniMap" width="300" height="150"></canvas>
+        
+        <span class="label">Neural Architecture</span>
+        <canvas id="nnCanvas" width="300" height="400"></canvas>
+        
+        <button onclick="resetEvolution()">Factory Reset</button>
+        <div id="save-indicator">Memory: Initializing...</div>
+    </div>
+    <canvas id="simCanvas"></canvas>
+
+<script>
+const canvas = document.getElementById('simCanvas');
+const ctx = canvas.getContext('2d');
+const mmCtx = document.getElementById('miniMap').getContext('2d');
+const nnCtx = document.getElementById('nnCanvas').getContext('2d');
+
+const WORLD_SIZE = 4000;
+const STORAGE_KEY = 'ai_v9_lifespan_save';
+const SENSOR_COUNT = 11;
+const SENSOR_RANGE = 350;
+const DETECTION_RADIUS = 80;
+
+canvas.width = window.innerWidth - 340;
+canvas.height = window.innerHeight;
+
+class NeuralNetwork {
+    constructor(inputs, hidden, outputs) {
+        this.weights1 = Array.from({length: hidden}, () => Array(inputs).fill(0).map(() => Math.random() * 2 - 1));
+        this.weights2 = Array.from({length: outputs}, () => Array(hidden).fill(0).map(() => Math.random() * 2 - 1));
+        this.lastInputs = Array(inputs).fill(0);
+        this.lastHidden = Array(hidden).fill(0);
+        this.lastOutputs = Array(outputs).fill(0);
+    }
+    predict(inputs) {
+        this.lastInputs = inputs;
+        this.lastHidden = this.weights1.map(row => 1 / (1 + Math.exp(-row.reduce((sum, w, i) => sum + w * inputs[i], 0))));
+        this.lastOutputs = this.weights2.map(row => 1 / (1 + Math.exp(-row.reduce((sum, w, i) => sum + w * this.lastHidden[i], 0))));
+        return this.lastOutputs;
+    }
+    mutate(rate) {
+        const m = (v) => Math.random() < rate ? v + (Math.random() * 0.4 - 0.2) : v;
+        this.weights1 = this.weights1.map(row => row.map(m));
+        this.weights2 = this.weights2.map(row => row.map(m));
+    }
+}
+
+class Vehicle {
+    constructor(brain = null) {
+        this.brain = brain || new NeuralNetwork(SENSOR_COUNT, 8, 2);
+        this.spawn();
+        this.thrustL = 0;
+        this.thrustR = 0;
+    }
+    spawn() {
+        this.x = Math.random() * WORLD_SIZE;
+        this.y = Math.random() * WORLD_SIZE;
+        this.angle = Math.random() * Math.PI * 2;
+        this.health = 100;
+        this.maxHealth = 100;
+        this.fitness = 0;
+        this.dead = false;
+        this.sensorValues = Array(SENSOR_COUNT).fill(0);
+    }
+    update(food, obstacles) {
+        if (this.dead) return;
+        if (this.x < 0) this.x = WORLD_SIZE; else if (this.x > WORLD_SIZE) this.x = 0;
+        if (this.y < 0) this.y = WORLD_SIZE; else if (this.y > WORLD_SIZE) this.y = 0;
+
+        for (let i = 0; i < SENSOR_COUNT; i++) {
+            const angleOffset = -1.0 + (i / (SENSOR_COUNT - 1)) * 2.0;
+            const rayAngle = this.angle + angleOffset;
+            let val = 0;
+            const scanX = this.x + Math.cos(rayAngle) * SENSOR_RANGE;
+            const scanY = this.y + Math.sin(rayAngle) * SENSOR_RANGE;
+            food.forEach(f => { if(Math.hypot(f.x - scanX, f.y - scanY) < DETECTION_RADIUS) val = 1; });
+            obstacles.forEach(o => { if(Math.hypot(o.x - scanX, o.y - scanY) < DETECTION_RADIUS) val = -1; });
+            this.sensorValues[i] = val;
+        }
+
+        const outputs = this.brain.predict(this.sensorValues);
+        this.thrustL = outputs[0];
+        this.thrustR = outputs[1];
+
+        this.angle += (this.thrustL - this.thrustR) * 0.12;
+        this.x += Math.cos(this.angle) * (this.thrustL + this.thrustR) * 3.5;
+        this.y += Math.sin(this.angle) * (this.thrustL + this.thrustR) * 3.5;
+        
+        this.health -= 0.18; // Decay
+        this.fitness += 0.1;
+
+        food.forEach((f, i) => {
+            if (Math.hypot(this.x-f.x, this.y-f.y) < 25) {
+                this.health = Math.min(this.maxHealth, this.health + 40); 
+                this.fitness += 150;
+                food[i] = {x: Math.random()*WORLD_SIZE, y: Math.random()*WORLD_SIZE};
+            }
+        });
+        obstacles.forEach(o => { if (Math.hypot(this.x-o.x, this.y-o.y) < 18) this.dead = true; });
+        if (this.health <= 0) this.dead = true;
+    }
+    draw(ctx, isLeader) {
+        ctx.save();
+        ctx.translate(this.x, this.y);
+
+        // Lifespan Bar
+        ctx.fillStyle = "#333";
+        ctx.fillRect(-15, -20, 30, 4);
+        ctx.fillStyle = this.health > 30 ? "#0f0" : "#f00";
+        ctx.fillRect(-15, -20, (this.health / this.maxHealth) * 30, 4);
+
+        ctx.rotate(this.angle);
+        if (this.thrustL > 0.1) {
+            ctx.fillStyle = `rgba(255, 100, 0, ${this.thrustL})`;
+            ctx.fillRect(-15, -10, -this.thrustL * 25, 4);
+        }
+        if (this.thrustR > 0.1) {
+            ctx.fillStyle = `rgba(255, 100, 0, ${this.thrustR})`;
+            ctx.fillRect(-15, 6, -this.thrustR * 25, 4);
+        }
+
+        for (let i = 0; i < SENSOR_COUNT; i++) {
+            const angleOffset = -1.0 + (i / (SENSOR_COUNT - 1)) * 2.0;
+            const v = this.sensorValues[i];
+            ctx.strokeStyle = v > 0 ? '#0f0' : (v < 0 ? '#f00' : 'rgba(255,255,255,0.05)');
+            ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(Math.cos(angleOffset) * SENSOR_RANGE, Math.sin(angleOffset) * SENSOR_RANGE); ctx.stroke();
+        }
+        ctx.fillStyle = isLeader ? '#fff' : '#0ff';
+        ctx.beginPath(); ctx.moveTo(18,0); ctx.lineTo(-10,-10); ctx.lineTo(-10,10); ctx.fill();
+        ctx.restore();
+    }
+}
+
+let vehicles = [], food = [], obstacles = [], gen = 1;
+let cameraX = 0, cameraY = 0;
+
+function init() {
+    const data = localStorage.getItem(STORAGE_KEY);
+    let saved = data ? JSON.parse(data) : null;
+    if (saved) gen = saved.gen || 1;
+    
+    document.getElementById('genHUD').innerText = gen;
+
+    food = Array.from({length: 150}, () => ({x: Math.random()*WORLD_SIZE, y: Math.random()*WORLD_SIZE}));
+    obstacles = Array.from({length: 100}, () => ({x: Math.random()*WORLD_SIZE, y: Math.random()*WORLD_SIZE}));
+    
+    vehicles = Array.from({length: 12}, (_, i) => {
+        const b = new NeuralNetwork(SENSOR_COUNT, 8, 2);
+        if (saved) {
+            b.weights1 = saved.w1; b.weights2 = saved.w2;
+            if (i > 0) b.mutate(0.12);
+        }
+        return new Vehicle(b);
+    });
+}
+
+function drawUI(leader) {
+    mmCtx.fillStyle = '#000'; mmCtx.fillRect(0,0,300,150);
+    const sX = 300/WORLD_SIZE; const sY = 150/WORLD_SIZE;
+    food.forEach(f => { mmCtx.fillStyle = '#0a0'; mmCtx.fillRect(f.x*sX, f.y*sY, 1.5, 1.5); });
+    obstacles.forEach(o => { mmCtx.fillStyle = '#a00'; mmCtx.fillRect(o.x*sX, o.y*sY, 1.5, 1.5); });
+    vehicles.forEach(v => { if(!v.dead) { mmCtx.fillStyle = (v===leader)?'#fff':'#0ff'; mmCtx.fillRect(v.x*sX, v.y*sY, 3, 3); }});
+
+    nnCtx.clearRect(0,0,300,400);
+    const brain = leader.brain;
+    const padding = 40;
+    const colX = [padding, 150, 300 - padding];
+
+    brain.weights1.forEach((row, h) => {
+        row.forEach((w, i) => {
+            nnCtx.strokeStyle = w > 0 ? `rgba(0,255,0,${Math.abs(w)*0.4})` : `rgba(255,0,0,${Math.abs(w)*0.4})`;
+            nnCtx.lineWidth = Math.abs(w) * 2;
+            nnCtx.beginPath(); nnCtx.moveTo(colX[0], 25 + i * 34); nnCtx.lineTo(colX[1], 50 + h * 42); nnCtx.stroke();
+        });
+    });
+
+    brain.weights2.forEach((row, o) => {
+        row.forEach((w, h) => {
+            nnCtx.strokeStyle = w > 0 ? `rgba(0,255,0,${Math.abs(w)*0.4})` : `rgba(255,0,0,${Math.abs(w)*0.4})`;
+            nnCtx.lineWidth = Math.abs(w) * 2;
+            nnCtx.beginPath(); nnCtx.moveTo(colX[1], 50 + h * 42); nnCtx.lineTo(colX[2], 150 + o * 100); nnCtx.stroke();
+        });
+    });
+
+    const drawNode = (x, y, active) => {
+        nnCtx.fillStyle = active > 0.5 ? '#0f0' : (active < -0.5 ? '#f00' : '#111');
+        nnCtx.beginPath(); nnCtx.arc(x, y, 8, 0, Math.PI*2); nnCtx.fill();
+        nnCtx.strokeStyle = '#fff'; nnCtx.stroke();
+    };
+
+    brain.lastInputs.forEach((v, i) => drawNode(colX[0], 25 + i * 34, v));
+    brain.lastHidden.forEach((v, i) => drawNode(colX[1], 50 + i * 42, v));
+    brain.lastOutputs.forEach((v, i) => drawNode(colX[2], 150 + i * 100, v));
+}
+
+function loop() {
+    ctx.fillStyle = '#000'; ctx.fillRect(0,0,canvas.width, canvas.height);
+    let alive = vehicles.filter(v => !v.dead);
+    let leader = alive[0] || vehicles[0];
+
+    cameraX += (leader.x - canvas.width/2 - cameraX) * 0.05;
+    cameraY += (leader.y - canvas.height/2 - cameraY) * 0.05;
+
+    ctx.save(); ctx.translate(-cameraX, -cameraY);
+    food.forEach(f => { ctx.fillStyle = '#0f0'; ctx.beginPath(); ctx.arc(f.x, f.y, 8, 0, 7); ctx.fill(); });
+    obstacles.forEach(o => { ctx.fillStyle = '#f00'; ctx.beginPath(); ctx.arc(o.x, o.y, 10, 0, 7); ctx.fill(); });
+    alive.forEach(v => { v.update(food, obstacles); v.draw(ctx, v === leader); });
+    ctx.restore();
+
+    drawUI(leader);
+    document.getElementById('aliveCount').innerText = alive.length;
+
+    if (alive.length === 0) {
+        let best = vehicles.sort((a,b) => b.fitness - a.fitness)[0];
+        gen++; // Increment before saving
+        localStorage.setItem(STORAGE_KEY, JSON.stringify({
+            w1: best.brain.weights1, 
+            w2: best.brain.weights2,
+            gen: gen
+        }));
+        document.getElementById('fitness').innerText = Math.round(best.fitness);
+        document.getElementById('save-indicator').innerText = `Sync: Gen ${gen} Uploaded`;
+        init();
+    }
+    requestAnimationFrame(loop);
+}
+
+function resetEvolution() { localStorage.removeItem(STORAGE_KEY); location.reload(); }
+init();
+loop();
+</script>
+</body>
+</html>

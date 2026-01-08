@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Toroidal AI Explorer – Optimized</title>
+<style>
+body { margin:0; overflow:hidden; background:#111; font-family:monospace }
+canvas { display:block }
+#game { position:absolute; inset:0 }
+#network {
+    position:absolute; bottom:20px; left:20px;
+    width:400px; height:200px;
+    border:2px solid #00ffcc;
+    background:#0a0a0a;
+}
+#hud {
+    position:absolute; top:20px; left:50%;
+    transform:translateX(-50%);
+    color:#0f0; background:rgba(0,0,0,.7);
+    padding:10px 20px; border:2px solid #0f0;
+    border-radius:8px; text-align:center;
+}
+#controls {
+    position:absolute; top:20px; right:20px;
+    background:#111; color:#00ffcc;
+    padding:15px; border:2px solid #00ffcc;
+    width:260px; max-height:90vh; overflow:auto;
+}
+#controls label { display:block; font-size:12px }
+#controls input[type=range] { width:100% }
+#controls button {
+    width:100%; margin:6px 0; padding:8px;
+    background:#00ffcc; border:0; font-weight:bold;
+}
+.value { float:right; color:#0f0 }
+</style>
+</head>
+<body>
+
+<div id="hud">Initializing…</div>
+<canvas id="game"></canvas>
+<canvas id="network"></canvas>
+
+<div id="controls">
+<h3>Training</h3>
+
+<label>Population <span id="pval" class="value">10</span></label>
+<input id="population" type="range" min="1" max="30" value="10">
+
+<label>Sensors <span id="sval" class="value">7</span></label>
+<input id="sensors" type="range" min="3" max="7" step="2" value="7">
+
+<label>Mutation <span id="mval" class="value">0.30</span></label>
+<input id="mutation" type="range" min="0" max="1" step="0.05" value="0.3">
+
+<label>Generation (s) <span id="gval" class="value">15</span></label>
+<input id="gtime" type="range" min="5" max="60" value="15">
+
+<label><input id="showSensors" type="checkbox" checked> Sensors</label>
+<label><input id="showNN" type="checkbox" checked> Neural Net</label>
+
+<button id="reset">Reset</button>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/synaptic/1.1.4/synaptic.min.js"></script>
+<script>
+/* -------------------- SETUP -------------------- */
+const { Layer, Network } = synaptic;
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+const netCanvas = document.getElementById("network");
+const netCtx = netCanvas.getContext("2d");
+const hud = document.getElementById("hud");
+
+function resize(){
+    canvas.width = innerWidth;
+    canvas.height = innerHeight;
+}
+addEventListener("resize", resize);
+resize();
+
+/* -------------------- PARAMS -------------------- */
+const SCALE = 60;
+const params = {
+    population:10,
+    sensors:7,
+    mutation:0.3,
+    genTime:15,
+    showSensors:true,
+    showNN:true,
+    world:80,
+    food:25,
+    range:35,
+    thrust:0.015
+};
+
+/* -------------------- UI -------------------- */
+const bind = (id, key, out) => {
+    const el = document.getElementById(id);
+    const v = document.getElementById(out);
+    v.textContent = el.value;
+    el.oninput = e => {
+        params[key] = +e.target.value;
+        v.textContent = e.target.value;
+        if(key==="sensors") updateSensorAngles();
+    };
+};
+bind("population","population","pval");
+bind("sensors","sensors","sval");
+bind("mutation","mutation","mval");
+bind("gtime","genTime","gval");
+
+showSensors.onchange = e => params.showSensors = e.target.checked;
+showNN.onchange = e => params.showNN = e.target.checked;
+reset.onclick = () => resetGen();
+
+/* -------------------- SENSOR CACHE -------------------- */
+let sensorAngles = [];
+function updateSensorAngles(){
+    sensorAngles.length = 0;
+    const spread = Math.PI/2;
+    for(let i=0;i<params.sensors;i++){
+        sensorAngles.push(-spread/2 + spread*i/(params.sensors-1));
+    }
+}
+updateSensorAngles();
+
+/* -------------------- WORLD -------------------- */
+let food = [];
+function spawnFood(){
+    while(food.length < params.food){
+        food.push({
+            x:(Math.random()-.5)*params.world,
+            y:(Math.random()-.5)*params.world
+        });
+    }
+}
+
+/* -------------------- VEHICLE -------------------- */
+function createBrain(){
+    const i = new Layer(params.sensors);
+    const h = new Layer(8);
+    const o = new Layer(2);
+    i.project(h); h.project(o);
+    return new Network({input:i, hidden:[h], output:o});
+}
+
+class Vehicle {
+    constructor(brain){
+        this.x=(Math.random()-.5)*params.world;
+        this.y=(Math.random()-.5)*params.world;
+        this.vx=this.vy=0;
+        this.a=Math.random()*Math.PI*2;
+        this.av=0;
+        this.score=0;
+        this.brain = brain || createBrain();
+        this.sensors = new Float32Array(params.sensors);
+        this.out=[0,0];
+    }
+
+    sense(){
+        const R = params.range;
+        for(let i=0;i<sensorAngles.length;i++){
+            let min=R;
+            const sa=this.a+sensorAngles[i]-Math.PI/2;
+            for(const f of food){
+                const dx=f.x-this.x, dy=f.y-this.y;
+                const d=Math.hypot(dx,dy);
+                if(d>=min||d>R) continue;
+                const da=Math.abs(((Math.atan2(dy,dx)-sa+Math.PI)% (2*Math.PI))-Math.PI);
+                if(da<0.3) min=d;
+            }
+            this.sensors[i]=1-min/R;
+        }
+    }
+
+    think(){
+        this.out = this.brain.activate(this.sensors);
+    }
+
+    update(){
+        const L=this.out[0], R=this.out[1];
+        const p=params.thrust;
+        this.vx+=Math.sin(this.a)*(L+R)*p;
+        this.vy+=-Math.cos(this.a)*(L+R)*p;
+        this.av+=(R-L)*0.008;
+        this.vx*=.98; this.vy*=.98; this.av*=.95;
+        this.x+=this.vx; this.y+=this.vy; this.a+=this.av;
+        const w=params.world/2;
+        if(this.x>w) this.x=-w; if(this.x<-w) this.x=w;
+        if(this.y>w) this.y=-w; if(this.y<-w) this.y=w;
+    }
+}
+
+/* -------------------- EVOLUTION -------------------- */
+let vehicles=[], best=null, bestScore=0;
+let gen=0, genStart=Date.now(), frame=0;
+
+function createGen(){
+    vehicles=[];
+    for(let i=0;i<params.population;i++){
+        if(best && i===0){
+            vehicles.push(new Vehicle(Network.fromJSON(best.brain.toJSON())));
+        } else {
+            const v=new Vehicle(best?Network.fromJSON(best.brain.toJSON()):null);
+            if(best) mutate(v.brain);
+            vehicles.push(v);
+        }
+    }
+    gen++; genStart=Date.now();
+}
+
+function mutate(brain){
+    const j=brain.toJSON();
+    for(const k in j.connections)
+        if(Math.random()<params.mutation)
+            j.connections[k].weight+=(Math.random()*2-1)*0.5;
+    brain.layers.input[0].network = Network.fromJSON(j);
+}
+
+function resetGen(){
+    gen=0; best=null; bestScore=0;
+    createGen();
+}
+
+/* -------------------- DRAW -------------------- */
+function draw(){
+    ctx.fillStyle="#0a0a0a";
+    ctx.fillRect(0,0,canvas.width,canvas.height);
+    const f=vehicles.reduce((a,b)=>b.score>a.score?b:a,vehicles[0]);
+    ctx.save();
+    ctx.translate(canvas.width/2,canvas.height/2);
+    ctx.translate(-f.x*SCALE,-f.y*SCALE);
+
+    ctx.fillStyle="#FFD700";
+    for(const p of food){
+        ctx.beginPath();
+        ctx.arc(p.x*SCALE,p.y*SCALE,6,0,Math.PI*2);
+        ctx.fill();
+    }
+
+    for(const v of vehicles){
+        ctx.save();
+        ctx.translate(v.x*SCALE,v.y*SCALE);
+        ctx.rotate(v.a);
+        ctx.fillStyle="#0ff";
+        ctx.fillRect(-15,-15,30,30);
+        ctx.restore();
+    }
+    ctx.restore();
+}
+
+/* -------------------- LOOP -------------------- */
+function loop(){
+    frame++;
+    if(Date.now()-genStart > params.genTime*1000){
+        const b=vehicles.reduce((a,b)=>b.score>a.score?b:a);
+        if(b.score>bestScore){ best=b; bestScore=b.score; }
+        createGen();
+    }
+
+    for(const v of vehicles){
+        if(frame%3===0) v.sense();
+        v.think();
+        v.update();
+    }
+
+    spawnFood();
+    draw();
+
+    hud.innerHTML=`GEN ${gen} | BEST ${bestScore}`;
+    requestAnimationFrame(loop);
+}
+
+/* -------------------- START -------------------- */
+spawnFood();
+createGen();
+loop();
+</script>
+</body>
+</html>
