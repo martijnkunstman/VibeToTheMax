@@ -1,5 +1,6 @@
 import RAPIER from "https://cdn.skypack.dev/@dimforge/rapier2d-compat";
 import { Pane } from "https://cdn.jsdelivr.net/npm/tweakpane@4.0.5/dist/tweakpane.min.js";
+import { SimpleNeuralNetwork } from "./simpleNeuralNet.js";
 
 await RAPIER.init();
 
@@ -7,12 +8,22 @@ const canvas = document.getElementById("game");
 const ctx = canvas.getContext("2d");
 const hud = document.getElementById("hud");
 
+const nnCanvas = document.getElementById("nnCanvas");
+const nnCtx = nnCanvas.getContext("2d");
+
+function resizeNN() {
+    nnCanvas.width = 360;
+    nnCanvas.height = 240;
+}
+resizeNN();
+
 let score = 0;
 let targetFood = null;
 let bestVirtualTarget = { x: 0, y: 0 };
 let leftThrusterActive = false;
 let rightThrusterActive = false;
 let currentCollider = null;
+let foodParticles = [];
 
 function resize() {
     canvas.width = window.innerWidth;
@@ -42,10 +53,19 @@ const params = {
     steeringStrength: 0.15,
     showSensors: true,
     thrusterSize: 1.2,
+    // GA Params
+    populationSize: 50,
+    mutationRate: 0.1,
+    generationTime: 30, // seconds
     //
     sensorCount: 7,
     sensorAngle: Math.PI / 2, // total cone angle
-    sensorRangeSensors: 10
+    sensorRangeSensors: 10,
+    //
+    useBrain: true, // Always use brain now
+    hiddenLayers: 6,
+    brainMutateRate: 0.1,
+    showBrain: true
 };
 
 /* ---------------- TWEAKPANE ---------------- */
@@ -72,33 +92,192 @@ aiPane.addBinding(params, "sensorRangeSensors", { min: 5, max: 120 });
 
 const visualPane = pane.addFolder({ title: "Visuals" });
 visualPane.addBinding(params, "showSensors");
+visualPane.addBinding(params, "showBrain");
 visualPane.addBinding(params, "thrusterSize", { min: 0.5, max: 4.0 });
 
-/* ---------------- PHYSICS ---------------- */
+const gaPane = pane.addFolder({ title: "Genetic Algorithm" });
+gaPane.addBinding(params, "populationSize", { min: 10, max: 100, step: 10 }).on('change', startGeneration);
+gaPane.addBinding(params, "generationTime", { min: 5, max: 60 });
+gaPane.addBinding(params, "mutationRate", { min: 0.01, max: 1.0 });
+gaPane.addButton({ title: "Force Next Gen" }).on('click', nextGeneration);
+
+const brainPane = pane.addFolder({ title: "Neural Network" });
+brainPane.addBinding(params, "useBrain");
+brainPane.addBinding(params, "brainMutateRate", { min: 0.01, max: 1.0 });
+brainPane.addButton({ title: "Randomize Brain" }).on('click', resetBrain); // These will operate on bestVehicle's brain
+brainPane.addButton({ title: "Reset to Seeker" }).on('click', resetSeeker); // These will operate on bestVehicle's brain
+brainPane.addButton({ title: "Mutate Brain" }).on('click', mutateBrain); // These will operate on bestVehicle's brain
+
+/* ---------------- PHYSICS & POPULATION ---------------- */
 
 const world = new RAPIER.World({ x: 0, y: 0 });
-const vehicle = world.createRigidBody(
-    RAPIER.RigidBodyDesc.dynamic()
-        .setTranslation(0, 0)
-        .setLinearDamping(1.2)
-        .setAngularDamping(2.5)
-);
+
+let population = [];
+let generation = 1;
+let genStartTime = Date.now();
+let bestVehicle = null;
+
+// Collision Filtering:
+// Group 1: Walls
+// Group 2: Vehicles
+// Vehicles should collide with Walls (Group 1) but NOT with other Vehicles (Group 2)
+// This requires setting collision groups properly.
+// RAPIER uses interaction groups: member | filter
+// We'll keep it simple: everything collides for now to avoid complexity, 
+// or maybe disable vehicle-vehicle collision if user requested "train multiple".
+// Usually training is cleaner without inter-vehicle collisions.
+
+function createVehicle(brain = null) {
+    const rigidBody = world.createRigidBody(
+        RAPIER.RigidBodyDesc.dynamic()
+            .setTranslation(0, 0)
+            .setLinearDamping(1.5)
+            .setAngularDamping(2.5)
+    );
+
+    // Spread out spawns
+    rigidBody.setTranslation({ x: (Math.random() - 0.5) * 10, y: (Math.random() - 0.5) * 10 }, true);
+
+    const colliderDesc = RAPIER.ColliderDesc.cuboid(params.vWidth / 2, params.vHeight / 2)
+        .setCollisionGroups(0x00020001); // Member Group 2, Filter Group 1 (Walls) - example logic varies by library
+    // Actually simplest Rapier JS way:
+    // By default everything hits everything. 
+    // We can just ignore it for now or implement collision groups if needed.
+
+    const collider = world.createCollider(colliderDesc, rigidBody);
+
+    // 9 inputs, 12, 8, 2 outputs
+    const newBrain = brain ? brain.clone() : new SimpleNeuralNetwork([params.sensorCount + 3, 12, 8, 2]);
+    if (!brain) newBrain.setBraitenbergWeights(); // Start smart if fresh
+
+    return {
+        rigidBody: rigidBody,
+        collider: collider,
+        brain: newBrain,
+        score: 0,
+        fitness: 0,
+        isDead: false,
+        traveled: 0,
+        x: 0, y: 0, // Last pos
+        sensors: [] // Store sensor data for vis
+    };
+}
+
+function startGeneration() {
+    // Clear old
+    population.forEach(p => {
+        world.removeCollider(p.collider, false);
+        world.removeRigidBody(p.rigidBody);
+    });
+    population = [];
+
+    spawnFood(); // Reset food
+
+    for (let i = 0; i < params.populationSize; i++) {
+        population.push(createVehicle());
+    }
+
+    genStartTime = Date.now();
+    generation = 1; // Reset if manually called, mostly
+    hud.innerText = `GEN: ${generation}`;
+    bestVehicle = null; // Reset best vehicle for new generation
+}
+
+function nextGeneration() {
+    // 1. Calculate Fitness
+    // Fitness = Score (Food eaten)
+    // Maybe add time alive logic later
+
+    let maxFit = 0;
+
+    // 2. Selection Pool
+    // Sort by fitness
+    population.sort((a, b) => b.score - a.score);
+
+    const eliteCount = 2;
+    const newPopBrains = [];
+
+    // Keep Elites
+    for (let i = 0; i < eliteCount; i++) {
+        if (population[i]) newPopBrains.push(population[i].brain.clone());
+    }
+
+    // Fill rest with children
+    while (newPopBrains.length < params.populationSize) {
+        // Simple Tournament Selection or Top %
+        // Select from top 10% or 10 individuals, whichever is smaller
+        const selectionPoolSize = Math.min(Math.ceil(params.populationSize * 0.1), 10);
+        const parentA = population[Math.floor(Math.random() * selectionPoolSize)].brain;
+        const parentB = population[Math.floor(Math.random() * selectionPoolSize)].brain;
+
+        let child = SimpleNeuralNetwork.crossover(parentA, parentB);
+        child.mutate(params.mutationRate);
+        newPopBrains.push(child);
+    }
+
+    // Cleanup Physics
+    population.forEach(p => {
+        world.removeCollider(p.collider, false);
+        world.removeRigidBody(p.rigidBody);
+    });
+    population = [];
+
+    // Create Next Gen
+    newPopBrains.forEach(b => {
+        population.push(createVehicle(b));
+    });
+
+    // Reset World State
+    genStartTime = Date.now();
+    generation++;
+    spawnFood();
+    bestVehicle = null; // Reset best vehicle for new generation
+}
 
 function updateCollider() {
-    if (currentCollider) world.removeCollider(currentCollider, true);
-    const colliderDesc = RAPIER.ColliderDesc.cuboid(params.vWidth / 2, params.vHeight / 2);
-    currentCollider = world.createCollider(colliderDesc, vehicle);
+    // Update all
+    // Simplified: Just restart gen if size changes
+    startGeneration();
 }
-updateCollider();
 
-let foodParticles = [];
-function spawnFood() {
-    while (foodParticles.length < params.foodCount) {
-        foodParticles.push({
-            x: (Math.random() - 0.5) * params.worldWidth,
-            y: (Math.random() - 0.5) * params.worldHeight
-        });
+// Initial Start
+startGeneration();
+
+/* ---------------- NEURAL NETWORK (for bestVehicle) ---------------- */
+
+// These functions now operate on the `bestVehicle`'s brain for visualization/debugging
+function resetBrain() {
+    if (bestVehicle) {
+        bestVehicle.brain = new SimpleNeuralNetwork([params.sensorCount + 3, 12, 8, 2]);
     }
+}
+
+function resetSeeker() {
+    if (bestVehicle) {
+        bestVehicle.brain = new SimpleNeuralNetwork([params.sensorCount + 3, 12, 8, 2]);
+        bestVehicle.brain.setBraitenbergWeights();
+    }
+}
+
+function mutateBrain() {
+    if (bestVehicle) {
+        bestVehicle.brain.mutate(params.brainMutateRate);
+    }
+}
+
+// let foodParticles = []; // Moved to top
+function spawnFood() {
+    foodParticles = []; // Clear existing food
+    while (foodParticles.length < params.foodCount) {
+        spawnOneFood();
+    }
+}
+
+function spawnOneFood() {
+    foodParticles.push({
+        x: (Math.random() - 0.5) * params.worldWidth,
+        y: (Math.random() - 0.5) * params.worldHeight
+    });
 }
 
 /* ---------------- LOGIC ---------------- */
@@ -165,78 +344,83 @@ function senseFoodRays(position, angle) {
 
 
 function update() {
-    const p = vehicle.translation();
-    const a = vehicle.rotation();
-    const power = params.thrustPower;
-    const ww = params.worldWidth;
-    const wh = params.worldHeight;
-
-    const raySensors = senseFoodRays(p, a);
-
-    leftThrusterActive = false;
-    rightThrusterActive = false;
-
-    // 1. TOROIDAL SENSOR LOGIC
-    targetFood = null;
-    let minDist = params.sensorRange;
-
-    foodParticles.forEach(f => {
-        // Check 9 "virtual" wrap-around positions for the shortest path
-        for (let ox = -1; ox <= 1; ox++) {
-            for (let oy = -1; oy <= 1; oy++) {
-                const vx = f.x + ox * ww;
-                const vy = f.y + oy * wh;
-                const d = Math.hypot(vx - p.x, vy - p.y);
-
-                if (d < minDist) {
-                    minDist = d;
-                    targetFood = f;
-                    bestVirtualTarget = { x: vx, y: vy };
-                }
-            }
-        }
-    });
-
-    // 2. AI STEERING TO VIRTUAL TARGET
-    if (params.autoSteer && targetFood) {
-        const angleToFood = Math.atan2(bestVirtualTarget.y - p.y, bestVirtualTarget.x - p.x);
-        let diff = (angleToFood + Math.PI / 2) - a;
-        while (diff < -Math.PI) diff += Math.PI * 2;
-        while (diff > Math.PI) diff -= Math.PI * 2;
-
-        vehicle.applyTorqueImpulse(diff * params.steeringStrength, true);
-        if (diff > 0.1) leftThrusterActive = true;
-        if (diff < -0.1) rightThrusterActive = true;
-
-        if (params.autoThrust && Math.abs(diff) < 0.4) {
-            const fwd = { x: Math.sin(a) * power, y: -Math.cos(a) * power };
-            vehicle.applyImpulse(fwd, true);
-            leftThrusterActive = true; rightThrusterActive = true;
-        }
+    // Check Generation Timer
+    const elapsed = (Date.now() - genStartTime) / 1000;
+    if (elapsed > params.generationTime) {
+        nextGeneration();
+        return;
     }
 
-    // 3. MANUAL INPUTS
-    const fwdVec = { x: Math.sin(a) * power, y: -Math.cos(a) * power };
-    if (keys["w"]) { vehicle.applyImpulse(fwdVec, true); leftThrusterActive = true; rightThrusterActive = true; }
-    if (keys["a"]) { vehicle.applyTorqueImpulse(-0.1, true); vehicle.applyImpulse({ x: fwdVec.x * params.turnThrustMult, y: fwdVec.y * params.turnThrustMult }, true); rightThrusterActive = true; }
-    if (keys["d"]) { vehicle.applyTorqueImpulse(0.1, true); vehicle.applyImpulse({ x: fwdVec.x * params.turnThrustMult, y: fwdVec.y * params.turnThrustMult }, true); leftThrusterActive = true; }
+    const ww = params.worldWidth;
+    const wh = params.worldHeight;
+    const power = params.thrustPower;
+
+    // Find Best
+    let maxScore = -1;
+
+    population.forEach(bot => {
+        if (bot.isDead) return;
+
+        const vehicle = bot.rigidBody;
+        const p = vehicle.translation();
+        const a = vehicle.rotation();
+
+        bot.x = p.x; bot.y = p.y; // Update pos
+
+        const raySensors = senseFoodRays(p, a);
+        bot.sensors = raySensors; // Store for render
+
+        // Normalize Inputs
+        const inputs = raySensors.map(r => {
+            return r.hit ? (1.0 - r.dist / params.sensorRangeSensors) : 0.0;
+        });
+
+        const vel = vehicle.linvel();
+        const ang = vehicle.angvel();
+        inputs.push(Math.tanh(vel.x / 5.0));
+        inputs.push(Math.tanh(vel.y / 5.0));
+        inputs.push(Math.tanh(ang / 2.0));
+
+        const outputs = bot.brain.feedForward(inputs);
+
+        // Control: [Steering (-1 to 1), Throttle (0 to 1)]
+        const steering = outputs[0]; // -1 Left, 1 Right
+        const throttle = (outputs[1] + 1) / 2; // Map -1..1 to 0..1
+
+        // Apply Forces
+        if (throttle > 0.1) {
+            const fwd = { x: Math.sin(a) * power * throttle, y: -Math.cos(a) * power * throttle };
+            vehicle.applyImpulse(fwd, true);
+        }
+        vehicle.applyTorqueImpulse(steering * params.steeringStrength, true);
+
+        // Wrapping
+        let { x, y } = vehicle.translation();
+        if (x > ww / 2) x = -ww / 2; else if (x < -ww / 2) x = ww / 2;
+        if (y > wh / 2) y = -wh / 2; else if (y < -wh / 2) y = wh / 2;
+        vehicle.setTranslation({ x, y }, true);
+
+        // Eating
+        for (let i = foodParticles.length - 1; i >= 0; i--) {
+            const f = foodParticles[i];
+            const collectRad = Math.max(params.vWidth, params.vHeight) / 2 + FOOD_RADIUS;
+            // Simple dist check (no wrap logic for eating locally yet to save perf)
+            if (Math.hypot(f.x - x, f.y - y) < collectRad) {
+                bot.score += 10;
+                foodParticles.splice(i, 1);
+                spawnOneFood();
+            }
+        }
+
+        if (bot.score > maxScore) {
+            maxScore = bot.score;
+            bestVehicle = bot;
+        }
+    });
 
     world.step();
 
-    // 4. WRAPPING & COLLECTION
-    let { x, y } = vehicle.translation();
-    if (x > ww / 2) x = -ww / 2; else if (x < -ww / 2) x = ww / 2;
-    if (y > wh / 2) y = -wh / 2; else if (y < -wh / 2) y = wh / 2;
-    vehicle.setTranslation({ x, y }, true);
-
-    foodParticles = foodParticles.filter(f => {
-        const collectRad = Math.max(params.vWidth, params.vHeight) / 2 + FOOD_RADIUS;
-        if (Math.hypot(f.x - x, f.y - y) < collectRad) {
-            score += 10; hud.innerText = `SCORE: ${score}`; return false;
-        }
-        return true;
-    });
-    spawnFood();
+    hud.innerText = `GEN: ${generation} | Time: ${(params.generationTime - elapsed).toFixed(1)}s | Best Score: ${maxScore}`;
 }
 
 /* ---------------- RENDERING ---------------- */
@@ -253,119 +437,165 @@ function drawFlame(xOffset, yOffset) {
 }
 
 function drawScene() {
-    const p = vehicle.translation();
-    const a = vehicle.rotation();
-
     ctx.fillStyle = "#0a0a0a";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
     ctx.save();
     ctx.translate(canvas.width / 2, canvas.height / 2);
     ctx.scale(params.zoom, params.zoom);
-    ctx.translate(-p.x * SCALE, -p.y * SCALE);
+
+    // Follow Best Vehicle or Center
+    const camX = bestVehicle ? bestVehicle.x : 0;
+    const camY = bestVehicle ? bestVehicle.y : 0;
+    ctx.translate(-camX * SCALE, -camY * SCALE);
 
     // World Boundary
     ctx.strokeStyle = "#1a3a1a";
     ctx.strokeRect(-params.worldWidth / 2 * SCALE, -params.worldHeight / 2 * SCALE, params.worldWidth * SCALE, params.worldHeight * SCALE);
 
-    // Sensor Line (Toroidal aware)
-    if (params.showSensors && targetFood) {
-        ctx.setLineDash([8, 8]); ctx.strokeStyle = "rgba(0, 255, 255, 0.4)";
-        ctx.beginPath(); ctx.moveTo(p.x * SCALE, p.y * SCALE); ctx.lineTo(bestVirtualTarget.x * SCALE, bestVirtualTarget.y * SCALE); ctx.stroke(); ctx.setLineDash([]);
-
-        ctx.strokeStyle = "cyan";
-        ctx.strokeRect((bestVirtualTarget.x - 0.3) * SCALE, (bestVirtualTarget.y - 0.3) * SCALE, 0.6 * SCALE, 0.6 * SCALE);
-    }
-
+    // Filtered Food Drawing (Optimized)
     // --- Updated Food Rendering with Wrapping (Ghosts) ---
     const ww = params.worldWidth;
     const wh = params.worldHeight;
 
     ctx.fillStyle = "#FFD700";
     foodParticles.forEach(f => {
-        // 1. Draw the primary food particle
+        // Draw Simple, ghosts are expensive fo 50 agents
         ctx.beginPath();
-        ctx.arc(
-            f.x * SCALE,
-            f.y * SCALE,
-            FOOD_RADIUS * SCALE,
-            0,
-            Math.PI * 2
-        );
+        ctx.arc(f.x * SCALE, f.y * SCALE, FOOD_RADIUS * SCALE, 0, Math.PI * 2);
         ctx.fill();
-
-        // 2. Draw "Ghost" particles if food is near an edge
-        // We check 8 neighbor offsets to see if a ghost should appear in the visible bounds
-        const drawGhost = (ox, oy) => {
-            ctx.globalAlpha = 0.8; // Make ghosts slightly transparent
-            //ctx.globalAlpha = 1; // Make ghosts slightly transparent
-
-            ctx.beginPath();
-            ctx.arc((f.x + ox * ww) * SCALE, (f.y + oy * wh) * SCALE,  FOOD_RADIUS * SCALE, 0, Math.PI * 2);
-            
-            
-            
-            ctx.fill();
-            ctx.globalAlpha = 1.0;
-        };
-
-        // Only draw ghosts if the ship is close enough to the border to see them 
-        // or just draw all 8 neighbors for a truly seamless look:
-        //if (Math.abs(f.x) > ww / 2 - 5 || Math.abs(f.y) > wh / 2 - 5) {
-        for (let ox = -1; ox <= 1; ox++) {
-            for (let oy = -1; oy <= 1; oy++) {
-                if (ox === 0 && oy === 0) continue; // Skip the primary one we already drew
-                drawGhost(ox, oy);
-            }
-        }
-        //}
     });
 
-    // --- Raycast Sensors ---
-    if (params.showSensors) {
-        const rays = senseFoodRays(p, a);
+    // Draw Population
+    population.forEach(bot => {
+        const p = { x: bot.x, y: bot.y };
+        const a = bot.rigidBody.rotation();
 
-        rays.forEach(r => {
-            const len = r.hit ? r.dist : params.sensorRangeSensors;
-            const alpha = 1.0 - len / params.sensorRangeSensors;
+        ctx.save();
+        ctx.translate(p.x * SCALE, p.y * SCALE);
+        ctx.rotate(a);
 
+        // Highlight Best
+        const isBest = (bot === bestVehicle);
 
-            ctx.strokeStyle = r.hit
-                ? `rgba(0,255,0,${0.8 * alpha})`
-                : `rgba(0,255,0,${0.25 * alpha})`;
+        ctx.fillStyle = isBest ? "#00FF00" : "rgba(100, 100, 100, 0.5)";
+        if (isBest) ctx.shadowBlur = 10; ctx.shadowColor = "#00FF00";
 
-            //ctx.strokeStyle = `rgba(0, 255, 0, ${alpha})`;
+        ctx.fillRect(-params.vWidth * SCALE / 2, -params.vHeight * SCALE / 2, params.vWidth * SCALE, params.vHeight * SCALE);
+        ctx.shadowBlur = 0;
 
-            ctx.beginPath();
-            ctx.moveTo(p.x * SCALE, p.y * SCALE);
-            ctx.lineTo(
-                (p.x + Math.sin(r.angle) * len) * SCALE,
-                (p.y - Math.cos(r.angle) * len) * SCALE
-            );
-            ctx.stroke();
-        });
+        ctx.restore();
+
+        // Draw Sensors for Best Only
+        if (isBest && params.showSensors && bot.sensors) {
+            bot.sensors.forEach(r => {
+                const len = r.hit ? r.dist : params.sensorRangeSensors;
+                ctx.strokeStyle = r.hit ? "rgba(0,255,0,0.5)" : "rgba(255,255,255,0.1)";
+                ctx.beginPath();
+                ctx.moveTo(p.x * SCALE, p.y * SCALE);
+                ctx.lineTo((p.x + Math.sin(r.angle) * len) * SCALE, (p.y - Math.cos(r.angle) * len) * SCALE);
+                ctx.stroke();
+            });
+        }
+    });
+
+    ctx.restore();
+
+    // drawMiniMap(p, ctx, canvas, params, foodParticles, targetFood); // Disabled for now or update later for best
+
+    // Draw Brain on its own canvas
+    if (params.showBrain && bestVehicle) {
+        drawBrain(nnCtx, bestVehicle.brain);
+    } else {
+        nnCtx.clearRect(0, 0, nnCanvas.width, nnCanvas.height);
+    }
+}
+
+function drawBrain(ctx, brain) {
+    if (!brain || !brain.levels) return;
+
+    // Clear the specific brain canvas
+    ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+
+    const w = ctx.canvas.width;
+    const h = ctx.canvas.height;
+    const x = 20;
+    const y = 20;
+    const drawW = w - 40;
+    const drawH = h - 40;
+
+    const levelCount = brain.levels.length;
+    // We have input + levelCount layers to draw
+    // Actually brain.levels has N levels. 
+    // Level 0 has inputs -> outputs (outputs is next layer's inputs).
+
+    // We want to draw NODES for:
+    // Input Layer
+    // Level 0 Output (Hidden 1)
+    // Level 1 Output (Hidden 2) ...
+    // ...
+
+    const totalLayers = levelCount + 1; // Input + N levels of outputs
+    const layerStride = drawW / (totalLayers - 1);
+    const nodeRadius = 4;
+
+    function getX(layerIndex) { return x + layerIndex * layerStride; }
+    function getY(nodeIndex, totalNodes) { return y + (nodeIndex + 0.5) * (drawH / totalNodes); }
+
+    // DRAW WEIGHTS
+    for (let l = 0; l < levelCount; l++) {
+        const level = brain.levels[l];
+        const inputX = getX(l);
+        const outputX = getX(l + 1);
+
+        for (let i = 0; i < level.inputs.length; i++) {
+            for (let j = 0; j < level.outputs.length; j++) {
+                const val = level.weights[i * level.outputs.length + j];
+                if (Math.abs(val) < 0.1) continue; // Optimization: Don't draw weak links
+
+                ctx.strokeStyle = val > 0 ? "rgba(0,255,0," + Math.abs(val) + ")" : "rgba(255,0,0," + Math.abs(val) + ")";
+                ctx.lineWidth = Math.abs(val); // thinner lines
+                ctx.beginPath();
+                ctx.moveTo(inputX, getY(i, level.inputs.length));
+                ctx.lineTo(outputX, getY(j, level.outputs.length));
+                ctx.stroke();
+            }
+        }
     }
 
+    // DRAW NODES
+    // Draw Input Layer
+    const firstLevel = brain.levels[0];
+    for (let i = 0; i < firstLevel.inputs.length; i++) {
+        const val = firstLevel.inputs[i];
+        const c = Math.floor((val * 0.5 + 0.5) * 255); // Inputs can be negative now (tanh)
+        ctx.fillStyle = `rgb(${c}, ${c}, ${c})`;
+        ctx.strokeStyle = "white";
+        ctx.beginPath();
+        ctx.arc(getX(0), getY(i, firstLevel.inputs.length), nodeRadius, 0, Math.PI * 2);
+        ctx.fill(); ctx.stroke();
+    }
 
-    // Ship
-    ctx.save();
-    ctx.translate(p.x * SCALE, p.y * SCALE);
-    ctx.rotate(a);
+    // Draw Output Layers for each Level
+    for (let l = 0; l < levelCount; l++) {
+        const level = brain.levels[l];
+        for (let i = 0; i < level.outputs.length; i++) {
+            const val = level.outputs[i];
+            const c = Math.floor((val + 1) / 2 * 255);
+            ctx.fillStyle = `rgb(${c}, ${c}, ${c})`;
+            ctx.strokeStyle = "white";
+            ctx.beginPath();
+            ctx.arc(getX(l + 1), getY(i, level.outputs.length), nodeRadius, 0, Math.PI * 2);
+            ctx.fill(); ctx.stroke();
 
-    const tx = params.vWidth * FOOD_RADIUS;
-    const ty = params.vHeight / 2;
-    if (leftThrusterActive) drawFlame(-tx, ty);
-    if (rightThrusterActive) drawFlame(tx, ty);
-
-    ctx.fillStyle = "#4CAF50";
-    ctx.fillRect(-params.vWidth * SCALE / 2, -params.vHeight * SCALE / 2, params.vWidth * SCALE, params.vHeight * SCALE);
-    ctx.fillStyle = "#222";
-    ctx.fillRect(-params.vWidth * 0.3 * SCALE, -params.vHeight * 0.4 * SCALE, params.vWidth * 0.6 * SCALE, params.vHeight * 0.3 * SCALE);
-    ctx.restore();
-
-    ctx.restore();
-
-    drawMiniMap(p, ctx, canvas, params, foodParticles, targetFood);
+            // Labels for final layer
+            if (l === levelCount - 1) {
+                ctx.fillStyle = "white";
+                ctx.font = "10px monospace";
+                ctx.fillText(i === 0 ? "L" : "R", getX(l + 1) + 10, getY(i, level.outputs.length) + 3);
+            }
+        }
+    }
 }
 
 

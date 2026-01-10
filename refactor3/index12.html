@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>NEURAL_PILOT_V11_DEBUG</title>
+<style>
+body { margin:0; background:#000; color:#0f0; font-family:Courier New, monospace; display:flex; overflow:hidden }
+#sidebar { width:340px; padding:20px; border-right:2px solid #0f0; background:#080808; height:100vh; display:flex; flex-direction:column }
+canvas { background:#000 }
+.stat { margin-bottom:8px; font-size:13px; color:#fff }
+.label { color:#0f0; font-size:10px; margin-top:14px }
+#miniMap { border:1px solid #333; margin-top:6px }
+#nnCanvas { border:1px solid #222; margin-top:6px; flex-grow:1 }
+button { background:#0f0; color:#000; border:none; padding:10px; margin-top:15px; cursor:pointer; font-weight:bold }
+</style>
+</head>
+
+<body>
+<div id="sidebar">
+<h2>NEURAL_PILOT_V11</h2>
+<div class="stat">GEN: <span id="genHUD">1</span></div>
+<div class="stat">ELITE FITNESS: <span id="fitness">0</span></div>
+<div class="stat">ALIVE: <span id="aliveCount">0</span></div>
+
+<span class="label">MINIMAP</span>
+<canvas id="miniMap" width="300" height="150"></canvas>
+
+<span class="label">NEURAL NETWORK</span>
+<canvas id="nnCanvas" width="300" height="400"></canvas>
+
+<button onclick="resetEvolution()">FACTORY RESET</button>
+</div>
+
+<canvas id="simCanvas"></canvas>
+
+<script>
+/* ================= CONFIG ================= */
+const WORLD_SIZE = 4000;
+const STORAGE_KEY = "ai_v11_save";
+const SENSOR_COUNT = 11;
+const SENSOR_RANGE = 450;
+const DETECTION_RADIUS = 60;
+
+/* ================= CANVAS ================= */
+const canvas = document.getElementById("simCanvas");
+const ctx = canvas.getContext("2d");
+const mmCtx = document.getElementById("miniMap").getContext("2d");
+const nnCtx = document.getElementById("nnCanvas").getContext("2d");
+
+canvas.width = window.innerWidth - 340;
+canvas.height = window.innerHeight;
+
+/* ================= NN ================= */
+const sigmoid = x => 1/(1+Math.exp(-x));
+
+class NeuralNetwork {
+    constructor(i,h,o){
+        this.w1 = Array.from({length:h},()=>Array(i).fill(0).map(()=>Math.random()*2-1));
+        this.w2 = Array.from({length:o},()=>Array(h).fill(0).map(()=>Math.random()*2-1));
+        this.li = Array(i).fill(0);
+        this.lh = Array(h).fill(0);
+        this.lo = Array(o).fill(0);
+    }
+    predict(input){
+        this.li = input;
+        this.lh = this.w1.map(r=>sigmoid(r.reduce((s,w,i)=>s+w*input[i],0)));
+        this.lo = this.w2.map(r=>sigmoid(r.reduce((s,w,i)=>s+w*this.lh[i],0)));
+        return this.lo;
+    }
+    mutate(rate){
+        const m=v=>Math.random()<rate?v+(Math.random()*0.4-0.2):v;
+        this.w1=this.w1.map(r=>r.map(m));
+        this.w2=this.w2.map(r=>r.map(m));
+    }
+}
+
+/* ================= VEHICLE ================= */
+class Vehicle {
+    constructor(brain=null){
+        this.brain = brain || new NeuralNetwork(SENSOR_COUNT,8,2);
+        this.reset();
+    }
+    reset(){
+        this.x=Math.random()*WORLD_SIZE;
+        this.y=Math.random()*WORLD_SIZE;
+        this.a=Math.random()*Math.PI*2;
+        this.h=100;
+        this.fit=0;
+        this.dead=false;
+        this.sensors=Array(SENSOR_COUNT).fill(0);
+        this.sensorHits=Array(SENSOR_COUNT).fill(0);
+    }
+
+    update(food,poison){
+        if(this.dead) return;
+
+        for(let i=0;i<SENSOR_COUNT;i++){
+            const off=-1+(i/(SENSOR_COUNT-1))*2;
+            const ang=this.a+off;
+            let f=0,p=0;
+
+            for(let d=20;d<=SENSOR_RANGE;d+=20){
+                const sx=this.x+Math.cos(ang)*d;
+                const sy=this.y+Math.sin(ang)*d;
+                const str=1-d/SENSOR_RANGE;
+
+                for(const fd of food)
+                    if(Math.hypot(fd.x-sx,fd.y-sy)<DETECTION_RADIUS)
+                        f=Math.max(f,str);
+
+                for(const po of poison)
+                    if(Math.hypot(po.x-sx,po.y-sy)<DETECTION_RADIUS)
+                        p=Math.max(p,str);
+            }
+            this.sensors[i]=f-p;
+            this.sensorHits[i]=f>p?f:-p;
+        }
+
+        const [L,R]=this.brain.predict(this.sensors);
+        this.a+=(L-R)*0.08;
+        const v=(L+R)*3.2;
+        this.x+=Math.cos(this.a)*v;
+        this.y+=Math.sin(this.a)*v;
+
+        this.h-=0.16;
+        this.fit+=0.08;
+
+        food.forEach(fd=>{
+            if(Math.hypot(fd.x-this.x,fd.y-this.y)<20){
+                this.h=Math.min(100,this.h+40);
+                this.fit+=120;
+                fd.x=Math.random()*WORLD_SIZE;
+                fd.y=Math.random()*WORLD_SIZE;
+            }
+        });
+
+        poison.forEach(po=>{
+            if(Math.hypot(po.x-this.x,po.y-this.y)<16)
+                this.dead=true;
+        });
+
+        if(this.h<=0) this.dead=true;
+
+        this.x=(this.x+WORLD_SIZE)%WORLD_SIZE;
+        this.y=(this.y+WORLD_SIZE)%WORLD_SIZE;
+    }
+
+    draw(ctx,isLeader){
+        ctx.save();
+        ctx.translate(this.x,this.y);
+
+        /* SENSOR RAYS */
+        for(let i=0;i<SENSOR_COUNT;i++){
+            const off=-1+(i/(SENSOR_COUNT-1))*2;
+            const strength=Math.abs(this.sensors[i]);
+            if(strength<0.05) continue;
+
+            ctx.strokeStyle=this.sensors[i]>0
+                ?`rgba(0,255,0,${strength})`
+                :`rgba(255,0,0,${strength})`;
+
+            ctx.beginPath();
+            ctx.moveTo(0,0);
+            ctx.lineTo(Math.cos(this.a+off)*SENSOR_RANGE*strength,
+                       Math.sin(this.a+off)*SENSOR_RANGE*strength);
+            ctx.stroke();
+        }
+
+        /* HEALTH BAR */
+        ctx.fillStyle="#333";
+        ctx.fillRect(-15,-20,30,4);
+        ctx.fillStyle=this.h>30?"#0f0":"#f00";
+        ctx.fillRect(-15,-20,(this.h/100)*30,4);
+
+        /* BODY */
+        ctx.rotate(this.a);
+        ctx.fillStyle=isLeader?"#fff":"#0ff";
+        ctx.beginPath();
+        ctx.moveTo(18,0);
+        ctx.lineTo(-10,-10);
+        ctx.lineTo(-10,10);
+        ctx.fill();
+        ctx.restore();
+    }
+}
+
+/* ================= WORLD ================= */
+let agents=[],food=[],poison=[],gen=1,camX=0,camY=0;
+
+function init(){
+    const save=JSON.parse(localStorage.getItem(STORAGE_KEY)||"null");
+    if(save) gen=save.gen;
+
+    food=Array.from({length:160},()=>({x:Math.random()*WORLD_SIZE,y:Math.random()*WORLD_SIZE}));
+    poison=Array.from({length:90},()=>({x:Math.random()*WORLD_SIZE,y:Math.random()*WORLD_SIZE}));
+
+    agents=Array.from({length:12},(_,i)=>{
+        const b=new NeuralNetwork(SENSOR_COUNT,8,2);
+        if(save){
+            b.w1=save.w1; b.w2=save.w2;
+            if(i>0) b.mutate(0.12);
+        }
+        return new Vehicle(b);
+    });
+
+    document.getElementById("genHUD").innerText=gen;
+}
+
+/* ================= UI ================= */
+function drawUI(leader){
+    /* MINIMAP */
+    mmCtx.fillStyle="#000";
+    mmCtx.fillRect(0,0,300,150);
+    const sx=300/WORLD_SIZE, sy=150/WORLD_SIZE;
+
+    food.forEach(f=>{mmCtx.fillStyle="#0a0";mmCtx.fillRect(f.x*sx,f.y*sy,2,2)});
+    poison.forEach(p=>{mmCtx.fillStyle="#a00";mmCtx.fillRect(p.x*sx,p.y*sy,2,2)});
+    agents.forEach(a=>{
+        if(a.dead) return;
+        mmCtx.fillStyle=a===leader?"#fff":"#0ff";
+        mmCtx.fillRect(a.x*sx,a.y*sy,3,3);
+    });
+
+    /* NEURAL NET */
+    nnCtx.clearRect(0,0,300,400);
+    const b=leader.brain;
+
+    b.w1.forEach((r,h)=>r.forEach((w,i)=>{
+        nnCtx.strokeStyle=w>0?"rgba(0,255,0,.4)":"rgba(255,0,0,.4)";
+        nnCtx.lineWidth=Math.abs(w)*2;
+        nnCtx.beginPath();
+        nnCtx.moveTo(40,20+i*30);
+        nnCtx.lineTo(150,40+h*40);
+        nnCtx.stroke();
+    }));
+
+    b.w2.forEach((r,o)=>r.forEach((w,h)=>{
+        nnCtx.strokeStyle=w>0?"rgba(0,255,0,.4)":"rgba(255,0,0,.4)";
+        nnCtx.lineWidth=Math.abs(w)*2;
+        nnCtx.beginPath();
+        nnCtx.moveTo(150,40+h*40);
+        nnCtx.lineTo(260,200+o*80);
+        nnCtx.stroke();
+    }));
+}
+
+/* ================= LOOP ================= */
+function loop(){
+    ctx.fillStyle="#000";
+    ctx.fillRect(0,0,canvas.width,canvas.height);
+
+    const alive=agents.filter(a=>!a.dead);
+    const leader=alive[0]||agents[0];
+
+    camX+=(leader.x-canvas.width/2-camX)*0.05;
+    camY+=(leader.y-canvas.height/2-camY)*0.05;
+
+    ctx.save();
+    ctx.translate(-camX,-camY);
+    food.forEach(f=>{ctx.fillStyle="#0f0";ctx.beginPath();ctx.arc(f.x,f.y,7,0,7);ctx.fill()});
+    poison.forEach(p=>{ctx.fillStyle="#f00";ctx.beginPath();ctx.arc(p.x,p.y,9,0,7);ctx.fill()});
+    alive.forEach(a=>{a.update(food,poison);a.draw(ctx,a===leader)});
+    ctx.restore();
+
+    drawUI(leader);
+    document.getElementById("aliveCount").innerText=alive.length;
+
+    if(!alive.length){
+        const best=agents.sort((a,b)=>b.fit-a.fit)[0];
+        gen++;
+        localStorage.setItem(STORAGE_KEY,JSON.stringify({w1:best.brain.w1,w2:best.brain.w2,gen}));
+        document.getElementById("fitness").innerText=Math.round(best.fit);
+        init();
+    }
+    requestAnimationFrame(loop);
+}
+
+function resetEvolution(){
+    localStorage.removeItem(STORAGE_KEY);
+    location.reload();
+}
+
+init();
+loop();
+</script>
+</body>
+</html>
