@@ -17,6 +17,14 @@ function resizeNN() {
 }
 resizeNN();
 
+const miniCanvas = document.getElementById("minimap");
+const miniCtx = miniCanvas.getContext("2d");
+function resizeMini() {
+    miniCanvas.width = 150;
+    miniCanvas.height = 150;
+}
+resizeMini();
+
 let score = 0;
 let targetFood = null;
 let bestVirtualTarget = { x: 0, y: 0 };
@@ -33,6 +41,7 @@ window.addEventListener("resize", resize);
 resize();
 
 const SCALE = 60;
+document.body.style.overflow = "hidden"; // Force no scrollbars
 
 /* ---------------- PARAMETERS ---------------- */
 
@@ -501,40 +510,33 @@ function drawScene() {
 
     ctx.restore();
 
-    // Draw Minimap
-    drawMiniMap(ctx, canvas, params, foodParticles, population, bestVehicle);
-
     // Draw Brain on its own canvas
     if (params.showBrain && bestVehicle) {
         drawBrain(nnCtx, bestVehicle.brain);
     } else {
         nnCtx.clearRect(0, 0, nnCanvas.width, nnCanvas.height);
     }
+
+    // Draw Minimap (on separate canvas)
+    drawMiniMap(miniCtx, miniCanvas, params, foodParticles, population, bestVehicle);
 }
 
 function drawMiniMap(ctx, canvas, params, foodParticles, population, bestVehicle) {
-    const mapSize = 150;
-    const margin = 20;
-    const mapX = canvas.width - mapSize - margin;
-    const mapY = canvas.height - mapSize - margin;
+    // Clear
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    ctx.save();
-    ctx.translate(mapX, mapY);
+    const mapSize = canvas.width;
 
     // Background
     ctx.fillStyle = "rgba(0, 0, 0, 0.5)";
-    ctx.strokeStyle = "rgba(255, 255, 255, 0.5)";
-    ctx.lineWidth = 2;
+    ctx.strokeStyle = "red";
+    ctx.lineWidth = 4;
     ctx.fillRect(0, 0, mapSize, mapSize);
     ctx.strokeRect(0, 0, mapSize, mapSize);
 
     // Scale factor
-    // World is params.worldWidth x params.worldHeight centered at 0,0
-    // Map is mapSize x mapSize from 0,0
     const scaleX = mapSize / params.worldWidth;
     const scaleY = mapSize / params.worldHeight;
-
-    // Center map coords: (0,0 world) -> (mapSize/2, mapSize/2 map)
     const centerX = mapSize / 2;
     const centerY = mapSize / 2;
 
@@ -563,8 +565,6 @@ function drawMiniMap(ctx, canvas, params, foodParticles, population, bestVehicle
             ctx.fillRect(mx - 1, my - 1, 2, 2);
         }
     });
-
-    ctx.restore();
 }
 
 function drawBrain(ctx, brain) {
@@ -581,15 +581,6 @@ function drawBrain(ctx, brain) {
     const drawH = h - 40;
 
     const levelCount = brain.levels.length;
-    // We have input + levelCount layers to draw
-    // Actually brain.levels has N levels. 
-    // Level 0 has inputs -> outputs (outputs is next layer's inputs).
-
-    // We want to draw NODES for:
-    // Input Layer
-    // Level 0 Output (Hidden 1)
-    // Level 1 Output (Hidden 2) ...
-    // ...
 
     const totalLayers = levelCount + 1; // Input + N levels of outputs
     const layerStride = drawW / (totalLayers - 1);
@@ -653,8 +644,6 @@ function drawBrain(ctx, brain) {
         }
     }
 }
-
-
 
 function loop() {
     update();
