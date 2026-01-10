@@ -40,19 +40,19 @@ function resize() {
 window.addEventListener("resize", resize);
 resize();
 
-const SCALE = 60;
+const SCALE = 50;
 document.body.style.overflow = "hidden"; // Force no scrollbars
 
 /* ---------------- PARAMETERS ---------------- */
 
-const FOOD_RADIUS = 0.6; // try 0.5–1.2
+const FOOD_RADIUS = 0.9; // try 0.5–1.2
 
 const params = {
     thrustPower: 0.25,
     turnThrustMult: 0.4,
-    worldWidth: 160,
-    worldHeight: 160,
-    foodCount: 100, // Increased for larger world
+    worldWidth: 500,
+    worldHeight: 500,
+    foodCount: 2000, // Increased for larger world
     zoom: 0.6,
     vWidth: 1.0,
     vHeight: 1.0,
@@ -62,14 +62,15 @@ const params = {
     steeringStrength: 0.15,
     showSensors: true,
     thrusterSize: 1.2,
+    healthDecay: 0.05, // Dies in ~20s if 1.0 health
     // GA Params
-    populationSize: 50,
+    populationSize: 40,
     mutationRate: 0.1,
-    generationTime: 30, // seconds
+    generationTime: 80, // seconds
     //
-    sensorCount: 7,
+    sensorCount: 9,
     sensorAngle: Math.PI / 2, // total cone angle
-    sensorRangeSensors: 10,
+    sensorRangeSensors: 20,
     //
     useBrain: true, // Always use brain now
     hiddenLayers: 6,
@@ -116,7 +117,11 @@ brainPane.addBinding(params, "brainMutateRate", { min: 0.01, max: 1.0 });
 brainPane.addButton({ title: "Randomize Brain" }).on('click', resetBrain); // These will operate on bestVehicle's brain
 brainPane.addButton({ title: "Reset to Seeker" }).on('click', resetSeeker); // These will operate on bestVehicle's brain
 brainPane.addButton({ title: "Mutate Brain" }).on('click', mutateBrain);
+brainPane.addButton({ title: "Mutate Brain" }).on('click', mutateBrain);
 brainPane.addButton({ title: "Clear Save" }).on('click', clearSave);
+
+const simPane = pane.addFolder({ title: "Simulation" });
+simPane.addBinding(params, "healthDecay", { min: 0.0, max: 0.5 });
 
 /* ---------------- PHYSICS & POPULATION ---------------- */
 
@@ -172,7 +177,10 @@ function createVehicle(brain = null) {
         isDead: false,
         traveled: 0,
         x: 0, y: 0, // Last pos
-        sensors: [] // Store sensor data for vis
+        traveled: 0,
+        x: 0, y: 0, // Last pos
+        sensors: [], // Store sensor data for vis
+        health: 1.0 // Start full health
     };
 }
 
@@ -285,6 +293,14 @@ function loadState() {
         // Deserialize Brain
         const loadedBrain = SimpleNeuralNetwork.deserialize(data.brain);
         if (!loadedBrain) return false;
+
+        // Check Topology (Prevent Crash)
+        const expectedInputs = params.sensorCount + 3;
+        if (loadedBrain.neuronCounts[0] !== expectedInputs) {
+            console.warn("Save file topology mismatch. Starting fresh.");
+            console.warn(`Saved: ${loadedBrain.neuronCounts[0]}, Expected: ${expectedInputs}`);
+            return false;
+        }
 
         // Start Generation with this brain as the "seed" for the population
         startGenerationWithBrain(loadedBrain);
@@ -450,7 +466,18 @@ function update() {
         const p = vehicle.translation();
         const a = vehicle.rotation();
 
-        bot.x = p.x; bot.y = p.y; // Update pos
+        // Duplicate removed
+
+        bot.x = p.x; bot.y = p.y;
+
+        // HEALTH UPDATE
+        bot.health -= params.healthDecay * (1 / 60); // Approx assuming 60fps step
+        if (bot.health <= 0) {
+            bot.isDead = true;
+            world.removeCollider(bot.collider, false);
+            world.removeRigidBody(bot.rigidBody);
+            return; // Stop processing this bot
+        }
 
         const raySensors = senseFoodRays(p, a);
         bot.sensors = raySensors; // Store for render
@@ -498,6 +525,7 @@ function update() {
             // Simple dist check (no wrap logic for eating locally yet to save perf)
             if (Math.hypot(f.x - x, f.y - y) < collectRad) {
                 bot.score += 10;
+                bot.health = Math.min(1.0, bot.health + 0.5); // Refill health
                 foodParticles.splice(i, 1);
                 spawnOneFood();
             }
@@ -511,7 +539,8 @@ function update() {
 
     world.step();
 
-    hud.innerText = `GEN: ${generation} | Time: ${(params.generationTime - elapsed).toFixed(1)}s | Best Score: ${maxScore}`;
+    const aliveCount = population.filter(p => !p.isDead).length;
+    hud.innerText = `GEN: ${generation} | Active: ${aliveCount}/${params.populationSize} | Time: ${(params.generationTime - elapsed).toFixed(1)}s | Best Score: ${maxScore}`;
 }
 
 /* ---------------- RENDERING ---------------- */
@@ -562,6 +591,8 @@ function drawScene() {
 
     // Draw Population
     population.forEach(bot => {
+        if (bot.isDead) return;
+
         const p = { x: bot.x, y: bot.y };
         const a = bot.rigidBody.rotation();
 
@@ -591,9 +622,8 @@ function drawScene() {
 
         ctx.restore();
 
-        // Draw Lifespan Bar (Global Time)
-        const elapsed = (Date.now() - genStartTime) / 1000;
-        const lifePct = Math.max(0, 1.0 - (elapsed / params.generationTime));
+        // Draw Lifespan Bar (Personal Health)
+        const lifePct = Math.max(0, bot.health);
 
         ctx.save();
         ctx.translate(p.x * SCALE, p.y * SCALE);
@@ -675,13 +705,16 @@ function drawMiniMap(ctx, canvas, params, foodParticles, population, bestVehicle
         const my = centerY + p.y * scaleY;
 
         if (bot === bestVehicle) {
-            ctx.fillStyle = "#00FF00";
+            ctx.fillStyle = "#00FFFF"; // Cyan for best
             ctx.beginPath();
-            ctx.arc(mx, my, 4, 0, Math.PI * 2);
+            ctx.arc(mx, my, 5, 0, Math.PI * 2); // Larger
             ctx.fill();
+            ctx.strokeStyle = "white";
+            ctx.lineWidth = 1;
+            ctx.stroke();
         } else {
-            ctx.fillStyle = "rgba(200, 200, 200, 0.5)";
-            ctx.fillRect(mx - 1, my - 1, 2, 2);
+            ctx.fillStyle = "white"; // Brighter for normal
+            ctx.fillRect(mx - 2, my - 2, 4, 4); // Larger 4x4
         }
     });
 }
