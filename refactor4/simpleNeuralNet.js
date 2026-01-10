@@ -61,6 +61,28 @@ export class SimpleNeuralNetwork {
         return clone;
     }
 
+    serialize() {
+        return {
+            neuronCounts: this.neuronCounts,
+            levels: this.levels.map(l => ({
+                weights: Array.from(l.weights),
+                biases: Array.from(l.biases)
+            }))
+        };
+    }
+
+    static deserialize(data) {
+        if (!data || !data.neuronCounts) return null;
+        const brain = new SimpleNeuralNetwork(data.neuronCounts);
+        brain.levels.forEach((level, i) => {
+            if (data.levels[i]) {
+                level.weights.set(data.levels[i].weights);
+                level.biases.set(data.levels[i].biases);
+            }
+        });
+        return brain;
+    }
+
     static crossover(brainA, brainB) {
         // Assume same topology
         const child = new SimpleNeuralNetwork(brainA.neuronCounts);

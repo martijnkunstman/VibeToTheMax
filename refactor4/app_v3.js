@@ -50,10 +50,10 @@ const FOOD_RADIUS = 0.6; // try 0.5–1.2
 const params = {
     thrustPower: 0.25,
     turnThrustMult: 0.4,
-    worldWidth: 80,
-    worldHeight: 80,
-    foodCount: 60,
-    zoom: 0.8,
+    worldWidth: 160,
+    worldHeight: 160,
+    foodCount: 100, // Increased for larger world
+    zoom: 0.6,
     vWidth: 1.0,
     vHeight: 1.0,
     autoSteer: true,
@@ -115,7 +115,8 @@ brainPane.addBinding(params, "useBrain");
 brainPane.addBinding(params, "brainMutateRate", { min: 0.01, max: 1.0 });
 brainPane.addButton({ title: "Randomize Brain" }).on('click', resetBrain); // These will operate on bestVehicle's brain
 brainPane.addButton({ title: "Reset to Seeker" }).on('click', resetSeeker); // These will operate on bestVehicle's brain
-brainPane.addButton({ title: "Mutate Brain" }).on('click', mutateBrain); // These will operate on bestVehicle's brain
+brainPane.addButton({ title: "Mutate Brain" }).on('click', mutateBrain);
+brainPane.addButton({ title: "Clear Save" }).on('click', clearSave);
 
 /* ---------------- PHYSICS & POPULATION ---------------- */
 
@@ -145,7 +146,10 @@ function createVehicle(brain = null) {
     );
 
     // Spread out spawns
-    rigidBody.setTranslation({ x: (Math.random() - 0.5) * 10, y: (Math.random() - 0.5) * 10 }, true);
+    rigidBody.setTranslation({
+        x: (Math.random() - 0.5) * (params.worldWidth - 10),
+        y: (Math.random() - 0.5) * (params.worldHeight - 10)
+    }, true);
 
     const colliderDesc = RAPIER.ColliderDesc.cuboid(params.vWidth / 2, params.vHeight / 2)
         .setCollisionGroups(0x00020001); // Member Group 2, Filter Group 1 (Walls) - example logic varies by library
@@ -239,6 +243,7 @@ function nextGeneration() {
     // Reset World State
     genStartTime = Date.now();
     generation++;
+    saveState(); // Auto-save on next gen
     spawnFood();
     bestVehicle = null; // Reset best vehicle for new generation
 }
@@ -250,7 +255,78 @@ function updateCollider() {
 }
 
 // Initial Start
-startGeneration();
+if (!loadState()) {
+    startGeneration();
+}
+
+/* ---------------- PERSISTENCE ---------------- */
+
+function saveState() {
+    if (!bestVehicle || !bestVehicle.brain) return;
+    const data = {
+        generation: generation,
+        brain: bestVehicle.brain.serialize()
+    };
+    localStorage.setItem("vibeToTheMax_save", JSON.stringify(data));
+    console.log("State Saved: Gen " + generation);
+}
+
+function loadState() {
+    const json = localStorage.getItem("vibeToTheMax_save");
+    if (!json) return false;
+
+    try {
+        const data = JSON.parse(json);
+        console.log("Loading State: Gen " + data.generation);
+
+        // Restore Gen
+        generation = data.generation || 1;
+
+        // Deserialize Brain
+        const loadedBrain = SimpleNeuralNetwork.deserialize(data.brain);
+        if (!loadedBrain) return false;
+
+        // Start Generation with this brain as the "seed" for the population
+        startGenerationWithBrain(loadedBrain);
+        return true;
+
+    } catch (e) {
+        console.error("Failed to load save", e);
+        return false;
+    }
+}
+
+function clearSave() {
+    localStorage.removeItem("vibeToTheMax_save");
+    console.log("Save Cleared");
+    location.reload();
+}
+
+function startGenerationWithBrain(seedBrain) {
+    // Clear old
+    population.forEach(p => {
+        world.removeCollider(p.collider, false);
+        world.removeRigidBody(p.rigidBody);
+    });
+    population = [];
+
+    spawnFood();
+
+    // Create population based on the seed brain
+    // Strategy: 1 Elite (exact copy), rest mutated children
+    population.push(createVehicle(seedBrain)); // The exact saved brain
+
+    // Fill rest with mutated versions of the seed
+    for (let i = 1; i < params.populationSize; i++) {
+        const brain = seedBrain.clone();
+        brain.mutate(params.mutationRate);
+        population.push(createVehicle(brain));
+    }
+
+    genStartTime = Date.now();
+    hud.innerText = `GEN: ${generation}`;
+    bestVehicle = null;
+}
 
 /* ---------------- NEURAL NETWORK (for bestVehicle) ---------------- */
 
@@ -396,6 +472,12 @@ function update() {
         const steering = outputs[0]; // -1 Left, 1 Right
         const throttle = (outputs[1] + 1) / 2; // Map -1..1 to 0..1
 
+        bot.throttle = throttle; // Store for visual
+
+        // Differential style mixing for visuals
+        bot.lStr = Math.max(0, throttle + steering);
+        bot.rStr = Math.max(0, throttle - steering);
+
         // Apply Forces
         if (throttle > 0.1) {
             const fwd = { x: Math.sin(a) * power * throttle, y: -Math.cos(a) * power * throttle };
@@ -434,14 +516,17 @@ function update() {
 
 /* ---------------- RENDERING ---------------- */
 
-function drawFlame(xOffset, yOffset) {
+function drawFlame(xOffset, yOffset, magnitude) {
+    if (magnitude < 0.1) return;
     ctx.save();
     ctx.translate(xOffset * SCALE, yOffset * SCALE);
     const flicker = 0.8 + Math.random() * 0.4;
-    const grad = ctx.createLinearGradient(0, 0, 0, params.thrusterSize * SCALE * flicker);
+    const flameLen = params.thrusterSize * magnitude * SCALE * flicker;
+
+    const grad = ctx.createLinearGradient(0, 0, 0, flameLen);
     grad.addColorStop(0, "white"); grad.addColorStop(0.2, "#ffaa00"); grad.addColorStop(1, "transparent");
     ctx.fillStyle = grad;
-    ctx.beginPath(); ctx.moveTo(-0.12 * SCALE, 0); ctx.quadraticCurveTo(0, params.thrusterSize * SCALE * flicker, 0.12 * SCALE, 0); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(-0.12 * SCALE, 0); ctx.quadraticCurveTo(0, flameLen, 0.12 * SCALE, 0); ctx.fill();
     ctx.restore();
 }
 
@@ -484,6 +569,17 @@ function drawScene() {
         ctx.translate(p.x * SCALE, p.y * SCALE);
         ctx.rotate(a);
 
+        // Draw Flames (Left and Right)
+        // Position at bottom (rear) edge, parallel (pointing down +y)
+        const yOff = params.vHeight / 2;
+        const xOff = params.vWidth / 4;
+
+        // Left Thruster (-x)
+        drawFlame(-xOff, yOff, bot.lStr || 0);
+
+        // Right Thruster (+x)
+        drawFlame(xOff, yOff, bot.rStr || 0);
+
         // Highlight Best
         const isBest = (bot === bestVehicle);
 
@@ -492,6 +588,29 @@ function drawScene() {
 
         ctx.fillRect(-params.vWidth * SCALE / 2, -params.vHeight * SCALE / 2, params.vWidth * SCALE, params.vHeight * SCALE);
         ctx.shadowBlur = 0;
+
+        ctx.restore();
+
+        // Draw Lifespan Bar (Global Time)
+        const elapsed = (Date.now() - genStartTime) / 1000;
+        const lifePct = Math.max(0, 1.0 - (elapsed / params.generationTime));
+
+        ctx.save();
+        ctx.translate(p.x * SCALE, p.y * SCALE);
+        // Do not rotate with ship, keep bar horizontal? No, rotate with ship looks better attached
+        ctx.rotate(a);
+
+        const barW = params.vWidth * SCALE;
+        const barH = 4;
+        const yPos = (params.vHeight * SCALE / 2) + 8; // Below ship
+
+        // Background
+        ctx.fillStyle = "red";
+        ctx.fillRect(-barW / 2, yPos, barW, barH);
+
+        // Foreground
+        ctx.fillStyle = `hsl(${120 * lifePct}, 100%, 50%)`; // Green to Red
+        ctx.fillRect(-barW / 2, yPos, barW * lifePct, barH);
 
         ctx.restore();
 
