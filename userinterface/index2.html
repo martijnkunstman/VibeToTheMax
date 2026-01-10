@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Boids Simulation Dashboard</title>
+
+<style>
+/* ================= Reset & Theme ================= */
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+:root {
+  --bg-main: #0e1117;
+  --bg-panel: #161b22;
+  --bg-panel-light: #1f2633;
+  --border: #30363d;
+  --text: #c9d1d9;
+  --accent: #58a6ff;
+}
+
+html, body {
+  height: 100%;
+  background: var(--bg-main);
+  color: var(--text);
+  font-family: system-ui, sans-serif;
+}
+
+body.resizing {
+  user-select: none;
+  cursor: col-resize;
+}
+
+/* ================= Layout ================= */
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.top-bar {
+  height: 48px;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  padding: 0 16px;
+  font-weight: 600;
+}
+
+.dashboard {
+  flex: 1;
+  display: flex;
+  padding: 6px;
+  overflow: hidden;
+}
+
+/* ================= Columns ================= */
+.column {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow: hidden;
+}
+
+.left { flex: 3; }
+.center { flex: 1.5; }
+.right { flex: 1.2; }
+
+/* ================= Panels ================= */
+.panel {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  display: flex;
+  flex-direction: column;
+  min-height: 120px;
+  overflow: hidden;
+}
+
+.panel-header {
+  padding: 8px 10px;
+  font-size: 0.85rem;
+  background: var(--bg-panel-light);
+  border-bottom: 1px solid var(--border);
+}
+
+.panel-body {
+  flex: 1;
+  padding: 8px;
+}
+
+/* ================= Canvas Placeholder ================= */
+.canvas-placeholder {
+  width: 100%;
+  height: 100%;
+  background:
+    repeating-linear-gradient(
+      45deg,
+      #1a1f2b,
+      #1a1f2b 10px,
+      #141824 10px,
+      #141824 20px
+    );
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.8rem;
+  color: #8b949e;
+}
+
+/* ================= Bottom ================= */
+.bottom {
+  height: 220px;
+  display: flex;
+  gap: 6px;
+  padding: 6px;
+  border-top: 1px solid var(--border);
+}
+
+/* ================= Splitters ================= */
+.v-splitter {
+  width: 6px;
+  background: var(--border);
+  cursor: col-resize;
+}
+
+.h-splitter {
+  height: 6px;
+  background: var(--border);
+  cursor: row-resize;
+}
+
+.v-splitter:hover,
+.h-splitter:hover {
+  background: var(--accent);
+}
+
+/* ================= Forms ================= */
+label {
+  font-size: 0.75rem;
+  margin-top: 8px;
+  display: block;
+}
+
+input, select, button {
+  width: 100%;
+  margin-top: 4px;
+  padding: 6px;
+  background: #0d1117;
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 4px;
+}
+
+button {
+  cursor: pointer;
+  background: var(--bg-panel-light);
+}
+</style>
+</head>
+
+<body>
+<div class="app">
+
+  <div class="top-bar">🧠 Boids Evolution Simulation Dashboard</div>
+
+  <div class="dashboard">
+
+    <div class="column left">
+      <div class="panel">
+        <div class="panel-header">Main Simulation</div>
+        <div class="panel-body">
+          <div class="canvas-placeholder">2D World Simulation</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="v-splitter"></div>
+
+    <div class="column center">
+      <div class="panel">
+        <div class="panel-header">Neural Network</div>
+        <div class="panel-body">
+          <div class="canvas-placeholder">Neural Net Viz</div>
+        </div>
+      </div>
+
+      <div class="h-splitter"></div>
+
+      <div class="panel">
+        <div class="panel-header">Mini Map</div>
+        <div class="panel-body">
+          <div class="canvas-placeholder">Mini Map</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="v-splitter"></div>
+
+    <div class="column right">
+      <div class="panel">
+        <div class="panel-header">Simulation Info</div>
+        <div class="panel-body">
+          <p>Generation: 42</p>
+          <p>Best Fitness: 123.45</p>
+          <p>Population: 200</p>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <div class="bottom">
+    <div class="panel" style="flex:2;">
+      <div class="panel-header">Simulation Config</div>
+      <div class="panel-body">
+        <label>Population</label>
+        <input type="number" value="200">
+        <label>Mutation Rate</label>
+        <input type="range" min="0" max="1" step="0.01">
+      </div>
+    </div>
+
+    <div class="panel" style="flex:1;">
+      <div class="panel-header">Save / Load</div>
+      <div class="panel-body">
+        <button>Save</button>
+        <button style="margin-top:8px;">Load</button>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+/* ================= Config ================= */
+const LAYOUT_KEY = "boids-layout";
+const MIN_COLUMN_WIDTH = 200;
+const MIN_PANEL_HEIGHT = 120;
+const SNAP_SIZE = 20;
+
+/* ================= Helpers ================= */
+const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
+const snap = v => SNAP_SIZE ? Math.round(v / SNAP_SIZE) * SNAP_SIZE : v;
+
+/* ================= Save / Load ================= */
+function saveLayout() {
+  const layout = {
+    columns: [...document.querySelectorAll('.dashboard > .column')]
+      .map(c => c.style.width || null),
+    centerHeights: [...document.querySelectorAll('.column.center .panel')]
+      .map(p => p.style.height || null)
+  };
+  localStorage.setItem(LAYOUT_KEY, JSON.stringify(layout));
+}
+
+function loadLayout() {
+  const raw = localStorage.getItem(LAYOUT_KEY);
+  if (!raw) return;
+  const data = JSON.parse(raw);
+
+  const cols = document.querySelectorAll('.dashboard > .column');
+  data.columns?.forEach((w, i) => {
+    if (w && cols[i]) {
+      cols[i].style.flex = 'none';
+      cols[i].style.width = w;
+    }
+  });
+
+  const panels = document.querySelectorAll('.column.center .panel');
+  data.centerHeights?.forEach((h, i) => {
+    if (h && panels[i]) {
+      panels[i].style.flex = 'none';
+      panels[i].style.height = h;
+    }
+  });
+}
+
+/* ================= Vertical Resize ================= */
+document.querySelectorAll('.v-splitter').forEach(splitter => {
+  splitter.addEventListener('mousedown', e => {
+    document.body.classList.add('resizing');
+    const left = splitter.previousElementSibling;
+    const right = splitter.nextElementSibling;
+    const startX = e.clientX;
+    const startLeft = left.offsetWidth;
+    const total = startLeft + right.offsetWidth;
+
+    function move(e) {
+      let newLeft = snap(startLeft + (e.clientX - startX));
+      newLeft = clamp(newLeft, MIN_COLUMN_WIDTH, total - MIN_COLUMN_WIDTH);
+      left.style.flex = 'none';
+      right.style.flex = 'none';
+      left.style.width = newLeft + 'px';
+      right.style.width = (total - newLeft) + 'px';
+    }
+
+    function up() {
+      document.body.classList.remove('resizing');
+      saveLayout();
+      window.removeEventListener('mousemove', move);
+      window.removeEventListener('mouseup', up);
+    }
+
+    window.addEventListener('mousemove', move);
+    window.addEventListener('mouseup', up);
+  });
+});
+
+/* ================= Horizontal Resize ================= */
+document.querySelectorAll('.h-splitter').forEach(splitter => {
+  splitter.addEventListener('mousedown', e => {
+    document.body.classList.add('resizing');
+    const top = splitter.previousElementSibling;
+    const bottom = splitter.nextElementSibling;
+    const startY = e.clientY;
+    const startTop = top.offsetHeight;
+    const total = startTop + bottom.offsetHeight;
+
+    function move(e) {
+      let newTop = snap(startTop + (e.clientY - startY));
+      newTop = clamp(newTop, MIN_PANEL_HEIGHT, total - MIN_PANEL_HEIGHT);
+      top.style.flex = 'none';
+      bottom.style.flex = 'none';
+      top.style.height = newTop + 'px';
+      bottom.style.height = (total - newTop) + 'px';
+    }
+
+    function up() {
+      document.body.classList.remove('resizing');
+      saveLayout();
+      window.removeEventListener('mousemove', move);
+      window.removeEventListener('mouseup', up);
+    }
+
+    window.addEventListener('mousemove', move);
+    window.addEventListener('mouseup', up);
+  });
+});
+
+window.addEventListener('load', loadLayout);
+</script>
+</body>
+</html>

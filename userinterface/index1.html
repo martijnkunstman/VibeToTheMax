@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Dockable Boids Dashboard</title>
+
+<style>
+/* ------------------ Reset & Theme ------------------ */
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg-main: #0e1117;
+  --bg-panel: #161b22;
+  --bg-panel-header: #1f2633;
+  --border: #30363d;
+  --text: #c9d1d9;
+  --accent: #58a6ff;
+  --splitter: #2d333b;
+}
+
+html, body {
+  height: 100%;
+  background: var(--bg-main);
+  color: var(--text);
+  font-family: system-ui, sans-serif;
+}
+
+/* ------------------ App Layout ------------------ */
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.top-bar {
+  height: 44px;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  font-weight: 600;
+}
+
+/* ------------------ Dock Zones ------------------ */
+.dashboard {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+}
+
+.dock-zone {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* initial sizes */
+.zone-left { width: 50%; }
+.zone-center { width: 30%; }
+.zone-right { width: 20%; }
+
+/* ------------------ Splitters ------------------ */
+.splitter-vertical {
+  width: 6px;
+  cursor: col-resize;
+  background: var(--splitter);
+}
+
+.splitter-horizontal {
+  height: 6px;
+  cursor: row-resize;
+  background: var(--splitter);
+}
+
+/* ------------------ Panels ------------------ */
+.panel {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border);
+}
+
+.panel.collapsed .panel-body {
+  display: none;
+}
+
+.panel-header {
+  background: var(--bg-panel-header);
+  padding: 6px 8px;
+  font-size: 0.8rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  cursor: grab;
+  user-select: none;
+}
+
+.panel-header span {
+  flex: 1;
+}
+
+.panel-header button {
+  background: none;
+  border: none;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 0.9rem;
+}
+
+.panel-body {
+  flex: 1;
+  padding: 8px;
+  min-height: 80px;
+}
+
+/* ------------------ Canvas Placeholder ------------------ */
+.placeholder {
+  height: 100%;
+  background: repeating-linear-gradient(
+    45deg,
+    #1a1f2b,
+    #1a1f2b 10px,
+    #141824 10px,
+    #141824 20px
+  );
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.75rem;
+  color: #8b949e;
+}
+
+/* ------------------ Bottom Dock ------------------ */
+.bottom {
+  height: 220px;
+  display: flex;
+  border-top: 1px solid var(--border);
+}
+
+.bottom .dock-zone {
+  flex: 1;
+}
+</style>
+</head>
+
+<body>
+<div class="app">
+
+  <div class="top-bar">🧠 Boids Evolution Dashboard</div>
+
+  <!-- Main Dock Area -->
+  <div class="dashboard">
+
+    <div class="dock-zone zone-left" data-zone>
+      <div class="panel" draggable="true">
+        <div class="panel-header">
+          <span>Main Simulation</span>
+          <button onclick="togglePanel(this)">▾</button>
+        </div>
+        <div class="panel-body">
+          <div class="placeholder">2D World Canvas</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="splitter-vertical"></div>
+
+    <div class="dock-zone zone-center" data-zone>
+      <div class="panel" draggable="true">
+        <div class="panel-header">
+          <span>Neural Network</span>
+          <button onclick="togglePanel(this)">▾</button>
+        </div>
+        <div class="panel-body">
+          <div class="placeholder">Neural Net Viz</div>
+        </div>
+      </div>
+
+      <div class="splitter-horizontal"></div>
+
+      <div class="panel" draggable="true">
+        <div class="panel-header">
+          <span>Mini Map</span>
+          <button onclick="togglePanel(this)">▾</button>
+        </div>
+        <div class="panel-body">
+          <div class="placeholder">Mini Map</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="splitter-vertical"></div>
+
+    <div class="dock-zone zone-right" data-zone>
+      <div class="panel" draggable="true">
+        <div class="panel-header">
+          <span>Simulation Info</span>
+          <button onclick="togglePanel(this)">▾</button>
+        </div>
+        <div class="panel-body">
+          <p>Generation: 42</p>
+          <p>Best Fitness: 123.45</p>
+          <p>Population: 200</p>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Bottom Dock -->
+  <div class="bottom">
+    <div class="dock-zone" data-zone>
+      <div class="panel" draggable="true">
+        <div class="panel-header">
+          <span>Simulation Config</span>
+          <button onclick="togglePanel(this)">▾</button>
+        </div>
+        <div class="panel-body">
+          <label>Population</label>
+          <input type="number" value="200"/>
+        </div>
+      </div>
+    </div>
+
+    <div class="dock-zone" data-zone>
+      <div class="panel" draggable="true">
+        <div class="panel-header">
+          <span>Save / Load</span>
+          <button onclick="togglePanel(this)">▾</button>
+        </div>
+        <div class="panel-body">
+          <button>Save</button>
+          <button>Load</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+/* ------------------ Collapse ------------------ */
+function togglePanel(btn) {
+  const panel = btn.closest('.panel');
+  panel.classList.toggle('collapsed');
+  btn.textContent = panel.classList.contains('collapsed') ? '▸' : '▾';
+}
+
+/* ------------------ Docking (Drag & Drop) ------------------ */
+let draggedPanel = null;
+
+document.querySelectorAll('.panel').forEach(panel => {
+  panel.addEventListener('dragstart', () => draggedPanel = panel);
+});
+
+document.querySelectorAll('[data-zone]').forEach(zone => {
+  zone.addEventListener('dragover', e => e.preventDefault());
+  zone.addEventListener('drop', () => {
+    if (draggedPanel) zone.appendChild(draggedPanel);
+  });
+});
+
+/* ------------------ Splitters ------------------ */
+document.querySelectorAll('.splitter-vertical').forEach(splitter => {
+  splitter.addEventListener('mousedown', e => {
+    const left = splitter.previousElementSibling;
+    const right = splitter.nextElementSibling;
+
+    const startX = e.clientX;
+    const startLeft = left.offsetWidth;
+    const startRight = right.offsetWidth;
+
+    function onMove(e) {
+      const dx = e.clientX - startX;
+      left.style.width = (startLeft + dx) + 'px';
+      right.style.width = (startRight - dx) + 'px';
+    }
+
+    function onUp() {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    }
+
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  });
+});
+
+document.querySelectorAll('.splitter-horizontal').forEach(splitter => {
+  splitter.addEventListener('mousedown', e => {
+    const top = splitter.previousElementSibling;
+    const bottom = splitter.nextElementSibling;
+
+    const startY = e.clientY;
+    const startTop = top.offsetHeight;
+    const startBottom = bottom.offsetHeight;
+
+    function onMove(e) {
+      const dy = e.clientY - startY;
+      top.style.height = (startTop + dy) + 'px';
+      bottom.style.height = (startBottom - dy) + 'px';
+    }
+
+    function onUp() {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    }
+
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  });
+});
+</script>
+</body>
+</html>

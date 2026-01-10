@@ -1,0 +1,35 @@
+body {
+    margin: 0;
+    overflow: hidden;
+    background: #111;
+    font-family: 'Courier New', Courier, monospace;
+}
+
+canvas {
+    display: block;
+}
+
+#hud {
+    position: absolute;
+    top: 20px;
+    left: 20px;
+    color: #00FF00;
+    font-size: 24px;
+    pointer-events: none;
+    text-shadow: 2px 2px 4px #000;
+}
+
+.tp-dfwv {
+    bottom: 20px !important;
+    top: auto !important;
+}
+
+#nnCanvas {
+  position: fixed;
+  left: 10px;
+  bottom: 10px;
+  width: 360px;
+  height: 240px;
+  background: #050505;
+  border: 1px solid #333;
+}
